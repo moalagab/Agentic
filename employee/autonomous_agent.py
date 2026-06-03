@@ -29,6 +29,13 @@ from employee.report_generator import (
 )
 from models.lead import LeadCreate, LeadSource
 
+# ─── Conversation stage definitions ──────────────────────────────────────────
+STAGE_NEW = "new"
+STAGE_DISCOVERY = "discovery"
+STAGE_QUALIFY = "qualify"
+STAGE_CLOSING = "closing"
+STAGE_ACTIVE = "active"
+
 if TYPE_CHECKING:
     from channels.telegram import TelegramHandler
     from config import Settings
@@ -375,20 +382,37 @@ class AutonomousEmployee:
     async def _handle_lead_conversation(
         self, phone: str, message: str, history: list[dict]
     ) -> str:
-        """Handle a conversation with a potential lead, extracting info progressively."""
+        """
+        Stage-aware lead conversation handler.
+        Guides the lead through: new → discovery → qualify → closing → active
+        """
+        profile = mem.get_lead_profile(phone)
+        stage = profile.get("stage", STAGE_NEW)
+        msg_count = mem.get_message_count(phone)
+
+        # Determine effective stage from context
+        stage = self._resolve_stage(stage, profile, msg_count)
+
+        stage_prompt = self._build_stage_prompt(stage, profile, phone)
         messages = [*history[:-1], {"role": "user", "content": message}]
 
         extract_tool = {
-            "name": "add_lead_from_conversation",
-            "description": "أضف العميل كـ Lead عندما تجمع اسمه ورقم هاتفه على الأقل",
+            "name": "register_lead",
+            "description": (
+                "سجّل العميل في النظام عندما تجمع: الاسم + (نوع البضاعة أو المسار). "
+                "استدعِ هذه الأداة بهدوء في الخلفية بدون إخبار العميل."
+            ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string"},
+                    "name": {"type": "string", "description": "اسم العميل أو المسمى الوظيفي"},
                     "company": {"type": "string"},
                     "cargo_type": {"type": "string"},
-                    "route": {"type": "string"},
-                    "budget_monthly": {"type": "string"},
+                    "route_from": {"type": "string"},
+                    "route_to": {"type": "string"},
+                    "fleet_size": {"type": "string"},
+                    "budget": {"type": "string"},
+                    "timeline": {"type": "string", "description": "متى يحتاج الخدمة"},
                     "notes": {"type": "string"},
                 },
                 "required": ["name"],
@@ -397,15 +421,11 @@ class AutonomousEmployee:
 
         response = await self.client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=512,
+            max_tokens=400,
             system=[
                 {
                     "type": "text",
-                    "text": (
-                        EMPLOYEE_SYSTEM_PROMPT
-                        + f"\n\nالعميل يتحدث من الرقم: {phone}\n"
-                        "اجمع المعلومات تدريجياً وأضفه كـ Lead عند توفر الاسم."
-                    ),
+                    "text": EMPLOYEE_SYSTEM_PROMPT + stage_prompt,
                     "cache_control": {"type": "ephemeral"},
                 }
             ],
@@ -413,38 +433,225 @@ class AutonomousEmployee:
             messages=messages,
         )
 
+        # Handle tool call — register lead silently
+        lead_registered = False
         if response.stop_reason == "tool_use":
             for block in response.content:
-                if block.type == "tool_use" and block.name == "add_lead_from_conversation":
+                if block.type == "tool_use" and block.name == "register_lead":
                     inp = block.input
-                    inp["phone"] = phone
-                    try:
-                        lead = LeadCreate(
-                            name=inp.get("name", ""),
-                            phone=phone,
-                            company=inp.get("company"),
-                            cargo_type=inp.get("cargo_type"),
-                            route=inp.get("route"),
-                            notes=inp.get("notes"),
-                            source=LeadSource.WHATSAPP,
-                        )
-                        processed = await self.pipeline.process(lead)
-                        await self.notify_new_lead(
-                            {**inp, "id": str(processed.lead.id), "source": "WHATSAPP",
-                             "crm_id": processed.lead.crm_id},
-                            {"priority": processed.lead.priority.value,
-                             "score": processed.lead.score,
-                             "next_actions": processed.next_actions},
-                        )
-                        logger.info("employee.lead_captured_from_chat", phone=phone)
-                    except Exception as exc:
-                        logger.error("employee.lead_capture_failed", error=str(exc))
+                    lead_registered = await self._register_lead_from_chat(phone, inp, profile)
 
-        # Get the text response from Claude
-        text_response = self._extract_text(response)
+            # If Claude only called the tool with no text, get a follow-up response
+            text_response = self._extract_text(response)
+            if not text_response:
+                follow_up = await self.client.messages.create(
+                    model=CLAUDE_MODEL,
+                    max_tokens=300,
+                    system=[
+                        {
+                            "type": "text",
+                            "text": EMPLOYEE_SYSTEM_PROMPT + stage_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }
+                    ],
+                    messages=[
+                        *messages,
+                        {"role": "assistant", "content": response.content},
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": next(
+                                        b.id for b in response.content if b.type == "tool_use"
+                                    ),
+                                    "content": "تم التسجيل بنجاح",
+                                }
+                            ],
+                        },
+                    ],
+                    tools=[extract_tool],
+                )
+                text_response = self._extract_text(follow_up)
+        else:
+            text_response = self._extract_text(response)
+
+        # Update profile with any new info extracted from this message
+        await self._update_profile_from_message(phone, message, profile, lead_registered)
+
         if not text_response:
             text_response = "وصلت رسالتكم، سنتواصل معكم قريباً."
         return text_response
+
+    def _resolve_stage(self, stage: str, profile: dict, msg_count: int) -> str:
+        """Determine the actual stage based on current profile completeness."""
+        if profile.get("crm_registered"):
+            return STAGE_ACTIVE
+
+        has_cargo = bool(profile.get("cargo_type"))
+        has_route = bool(profile.get("route_from") or profile.get("route_to"))
+        has_depth = bool(profile.get("fleet_size") or profile.get("budget"))
+
+        if has_cargo and has_route and has_depth:
+            return STAGE_CLOSING
+        if has_cargo or has_route:
+            return STAGE_QUALIFY if msg_count >= 4 else STAGE_DISCOVERY
+        if msg_count == 0:
+            return STAGE_NEW
+        return stage if stage != STAGE_NEW else STAGE_DISCOVERY
+
+    def _build_stage_prompt(self, stage: str, profile: dict, phone: str) -> str:
+        """Build a stage-specific prompt addition."""
+
+        missing = []
+        if not profile.get("cargo_type"):
+            missing.append("نوع البضاعة")
+        if not profile.get("route_from") and not profile.get("route_to"):
+            missing.append("المسار (من أين إلى أين)")
+        if not profile.get("fleet_size"):
+            missing.append("عدد الشاحنات المطلوبة")
+        if not profile.get("budget"):
+            missing.append("الميزانية التقريبية")
+
+        if stage == STAGE_NEW:
+            return (
+                f"\n\n## المرحلة: استقبال أول رسالة\n"
+                f"رقم العميل: {phone}\n\n"
+                "هذه أول رسالة من هذا الشخص.\n"
+                "ردّ بجملة ترحيب واحدة قصيرة باسم الشركة، "
+                "ثم اسأل سؤالاً واحداً مفتوحاً: كيف تقدر تخدمه.\n"
+                "لا تسأل عن اسمه بعد — دعه يتكلم أولاً.\n"
+                "مثال على النبرة: 'السلام عليكم، معك سمارت من سمارت فيلد للنقل المبرد — كيف نقدر نخدمك؟'"
+            )
+
+        if stage == STAGE_DISCOVERY:
+            next_q = missing[0] if missing else "متطلباتهم"
+            return (
+                f"\n\n## المرحلة: استكشاف الاحتياج\n"
+                f"رقم العميل: {phone}\n"
+                f"ما جُمع حتى الآن: {self._profile_summary(profile)}\n\n"
+                f"اسأل سؤالاً واحداً محدداً عن: {next_q}\n"
+                "لا تسأل أكثر من سؤال في نفس الرسالة.\n"
+                "إذا كان العميل سألك عن سعر أو خدمة، أجب أولاً ثم اسأل."
+            )
+
+        if stage == STAGE_QUALIFY:
+            next_q = missing[0] if missing else "التوقيت المناسب للبدء"
+            return (
+                f"\n\n## المرحلة: تعميق الاحتياج\n"
+                f"رقم العميل: {phone}\n"
+                f"ما جُمع: {self._profile_summary(profile)}\n\n"
+                f"لديك المعلومات الأساسية. اسأل الآن عن: {next_q}\n"
+                "يمكنك أن تذكر نقطة قيمة متعلقة بما قاله (سعر تقريبي، معلومة تقنية) "
+                "لإظهار الخبرة، ثم اسأل."
+            )
+
+        if stage == STAGE_CLOSING:
+            return (
+                f"\n\n## المرحلة: الإغلاق\n"
+                f"رقم العميل: {phone}\n"
+                f"ما جُمع: {self._profile_summary(profile)}\n\n"
+                "لديك معلومات كافية. أجب على أي سؤال عندهم، "
+                "ثم اطلب موعد مكالمة قصيرة أو اقترح خطوة تالية واضحة.\n"
+                "استدعِ أداة register_lead الآن إذا لم تفعل بعد.\n"
+                "لا تطوّل — جملة أو جملتين كحد أقصى."
+            )
+
+        if stage == STAGE_ACTIVE:
+            return (
+                f"\n\n## المرحلة: عميل نشط\n"
+                f"رقم العميل: {phone}\n"
+                f"هذا العميل مسجّل في النظام. {self._profile_summary(profile)}\n\n"
+                "أجب على استفساره مباشرة. إذا سأل عن سعر أو تفاصيل، أعطه معلومة واقعية.\n"
+                "إذا أراد المضي قدماً، رتّب الخطوة التالية."
+            )
+
+        return f"\n\nرقم العميل: {phone}\nما جُمع: {self._profile_summary(profile)}"
+
+    def _profile_summary(self, profile: dict) -> str:
+        parts = []
+        if profile.get("name"):
+            parts.append(f"الاسم: {profile['name']}")
+        if profile.get("cargo_type"):
+            parts.append(f"البضاعة: {profile['cargo_type']}")
+        if profile.get("route_from") or profile.get("route_to"):
+            parts.append(f"المسار: {profile.get('route_from','؟')}←{profile.get('route_to','؟')}")
+        if profile.get("fleet_size"):
+            parts.append(f"شاحنات: {profile['fleet_size']}")
+        if profile.get("budget"):
+            parts.append(f"الميزانية: {profile['budget']}")
+        return "، ".join(parts) if parts else "لا شيء بعد"
+
+    async def _register_lead_from_chat(
+        self, phone: str, inp: dict, profile: dict
+    ) -> bool:
+        """Register lead in CRM and update profile stage to active."""
+        try:
+            lead = LeadCreate(
+                name=inp.get("name", profile.get("name") or "عميل واتساب"),
+                phone=phone,
+                company=inp.get("company"),
+                cargo_type=inp.get("cargo_type"),
+                notes=inp.get("notes"),
+                source=LeadSource.WHATSAPP,
+            )
+            processed = await self.pipeline.process(lead)
+            mem.update_lead_profile(
+                phone,
+                stage=STAGE_ACTIVE,
+                name=inp.get("name"),
+                company=inp.get("company"),
+                cargo_type=inp.get("cargo_type"),
+                route_from=inp.get("route_from"),
+                route_to=inp.get("route_to"),
+                fleet_size=inp.get("fleet_size"),
+                budget=inp.get("budget"),
+                timeline=inp.get("timeline"),
+                crm_registered=1,
+            )
+            await self.notify_new_lead(
+                {
+                    **inp, "phone": phone,
+                    "id": str(processed.lead.id),
+                    "source": "WHATSAPP",
+                    "crm_id": processed.lead.crm_id,
+                },
+                {
+                    "priority": processed.lead.priority.value,
+                    "score": processed.lead.score,
+                    "next_actions": processed.next_actions,
+                },
+            )
+            logger.info("employee.lead_registered_from_chat", phone=phone)
+            return True
+        except Exception as exc:
+            logger.error("employee.lead_register_failed", error=str(exc))
+            return False
+
+    async def _update_profile_from_message(
+        self, phone: str, message: str, profile: dict, lead_registered: bool
+    ) -> None:
+        """Lightly parse message to update profile fields without calling Claude."""
+        if lead_registered:
+            return
+        text = message.lower()
+        updates: dict[str, Any] = {}
+
+        # Simple keyword cargo detection
+        cargo_map = {
+            "دجاج": "دواجن", "لحم": "لحوم", "سمك": "مأكولات بحرية",
+            "خضار": "خضروات", "فاكهة": "فواكه", "ألبان": "منتجات ألبان",
+            "مجمد": "منتجات مجمدة", "دواء": "أدوية", "صيدل": "صيدلانيات",
+            "طبي": "مستلزمات طبية",
+        }
+        if not profile.get("cargo_type"):
+            for kw, ct in cargo_map.items():
+                if kw in text:
+                    updates["cargo_type"] = ct
+                    break
+
+        if updates:
+            mem.update_lead_profile(phone, **updates)
 
     # ─── Helpers ──────────────────────────────────────────────────────────────
 

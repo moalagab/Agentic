@@ -47,6 +47,21 @@ def init_db():
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS lead_profiles (
+                phone TEXT PRIMARY KEY,
+                stage TEXT NOT NULL DEFAULT 'new',
+                name TEXT,
+                company TEXT,
+                cargo_type TEXT,
+                route_from TEXT,
+                route_to TEXT,
+                fleet_size TEXT,
+                budget TEXT,
+                timeline TEXT,
+                crm_registered INTEGER DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS lead_follow_ups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 lead_id TEXT NOT NULL,
@@ -105,6 +120,67 @@ def get_conversation_history(phone: str, limit: int = 20) -> list[dict]:
 def clear_conversation(phone: str):
     with _get_conn() as conn:
         conn.execute("DELETE FROM conversations WHERE phone=?", (phone,))
+
+
+def get_message_count(phone: str) -> int:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM conversations WHERE phone=?", (phone,)
+        ).fetchone()
+    return row["cnt"] if row else 0
+
+
+# ─── Lead profile (conversation stage + collected fields) ─────────────────────
+
+def get_lead_profile(phone: str) -> dict:
+    with _get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM lead_profiles WHERE phone=?", (phone,)
+        ).fetchone()
+    if row:
+        return dict(row)
+    return {
+        "phone": phone, "stage": "new", "name": None, "company": None,
+        "cargo_type": None, "route_from": None, "route_to": None,
+        "fleet_size": None, "budget": None, "timeline": None,
+        "crm_registered": 0,
+    }
+
+
+def update_lead_profile(phone: str, **kwargs) -> None:
+    profile = get_lead_profile(phone)
+    profile.update(kwargs)
+    profile["updated_at"] = datetime.utcnow().isoformat()
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO lead_profiles
+               (phone, stage, name, company, cargo_type, route_from, route_to,
+                fleet_size, budget, timeline, crm_registered, updated_at)
+               VALUES (:phone,:stage,:name,:company,:cargo_type,:route_from,:route_to,
+                       :fleet_size,:budget,:timeline,:crm_registered,:updated_at)
+               ON CONFLICT(phone) DO UPDATE SET
+                 stage=excluded.stage, name=COALESCE(excluded.name, lead_profiles.name),
+                 company=COALESCE(excluded.company, lead_profiles.company),
+                 cargo_type=COALESCE(excluded.cargo_type, lead_profiles.cargo_type),
+                 route_from=COALESCE(excluded.route_from, lead_profiles.route_from),
+                 route_to=COALESCE(excluded.route_to, lead_profiles.route_to),
+                 fleet_size=COALESCE(excluded.fleet_size, lead_profiles.fleet_size),
+                 budget=COALESCE(excluded.budget, lead_profiles.budget),
+                 timeline=COALESCE(excluded.timeline, lead_profiles.timeline),
+                 crm_registered=excluded.crm_registered,
+                 updated_at=excluded.updated_at""",
+            profile,
+        )
+
+
+def advance_stage(phone: str, new_stage: str) -> None:
+    with _get_conn() as conn:
+        conn.execute(
+            """INSERT INTO lead_profiles (phone, stage, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(phone) DO UPDATE SET stage=excluded.stage, updated_at=excluded.updated_at""",
+            (phone, new_stage, datetime.utcnow().isoformat()),
+        )
 
 
 # ─── Follow-up tracking ───────────────────────────────────────────────────────
