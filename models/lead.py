@@ -90,6 +90,12 @@ class Lead(BaseModel):
     score: int = Field(default=0, ge=0, le=100, description="AI qualification score 0-100")
     follow_up_date: Optional[datetime] = Field(None, description="Scheduled follow-up date/time")
 
+    # Opportunity Prediction
+    probability_to_close: float = Field(default=0.0, ge=0.0, le=1.0, description="Estimated close probability 0-1")
+    expected_monthly_revenue: float = Field(default=0.0, ge=0, description="Estimated monthly revenue in SAR")
+    expected_trips_per_month: int = Field(default=0, ge=0, description="Estimated trips per month")
+    estimated_ltv: float = Field(default=0.0, ge=0, description="Estimated lifetime value in SAR (3-year)")
+
     @field_validator("phone")
     @classmethod
     def normalize_phone(cls, v: Optional[str]) -> Optional[str]:
@@ -202,15 +208,17 @@ class ProcessedLead(BaseModel):
     def summary_arabic(self) -> str:
         """Returns a short Arabic summary of the processed lead."""
         priority_labels = {
-            LeadPriority.HIGH.value: "🔴 عالية",
-            LeadPriority.MEDIUM.value: "🟡 متوسطة",
-            LeadPriority.LOW.value: "🟢 منخفضة",
+            LeadPriority.HIGH.value: "● عالية",
+            LeadPriority.MEDIUM.value: "◑ متوسطة",
+            LeadPriority.LOW.value: "○ منخفضة",
         }
         priority_str = priority_labels.get(self.lead.priority, "غير معروفة")
+        revenue = f"{self.lead.expected_monthly_revenue:,.0f} ريال/شهر" if self.lead.expected_monthly_revenue else "غير محدد"
+        prob = f"{self.lead.probability_to_close*100:.0f}%" if self.lead.probability_to_close else "—"
         return (
             f"*{self.lead.name}*"
             f"\nالشركة: {self.lead.company or 'غير محدد'}"
             f"\nالأولوية: {priority_str}"
             f"\nالتقييم: {self.lead.score}/100"
-            f"\nالتصنيف: {self.lead.category}"
+            f"\nإيراد متوقع: {revenue}  |  احتمال الإغلاق: {prob}"
         )

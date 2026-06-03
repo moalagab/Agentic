@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 import structlog
 
+from agent.knowledge_base import get_kb_text, get_scoring_context
 from agent.prompts import SYSTEM_PROMPT_AR
 from employee import memory as mem
 from employee.report_generator import (
@@ -49,9 +50,15 @@ CLAUDE_MODEL = "claude-sonnet-4-6"
 
 # ─── Employee system prompt ───────────────────────────────────────────────────
 
-EMPLOYEE_SYSTEM_PROMPT = """\
+_KB_TEXT = get_kb_text()
+_SCORE_CTX = get_scoring_context()
+
+EMPLOYEE_SYSTEM_PROMPT = f"""\
 أنت مسؤول مبيعات في شركة سمارت فيلد للنقل المبرد — المملكة العربية السعودية.
 اسمك سمارت. تتحدث بثقة وإيجاز. لا تستخدم إيموجي في ردودك إلا نادراً وبحذر شديد.
+
+{_KB_TEXT}
+
 
 ## شخصيتك
 - سعودي الأسلوب، احترافي، مباشر

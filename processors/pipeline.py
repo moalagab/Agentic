@@ -127,11 +127,26 @@ class LeadPipeline:
         # ── Step 3: Run through AI agent (Claude) ────────────────────────────
         try:
             processed = await self.agent.process_lead(lead_create, pre_scored=pre_class)
+            # Stamp opportunity fields from hybrid scorer onto the lead
+            opp_updates = {
+                "probability_to_close": pre_class.get("probability_to_close", 0.0),
+                "expected_monthly_revenue": pre_class.get("estimated_monthly_revenue", 0.0),
+                "expected_trips_per_month": pre_class.get("estimated_trips", 0),
+                "estimated_ltv": round(
+                    pre_class.get("estimated_monthly_revenue", 0.0) * 12 * 2.5
+                ),  # 2.5-year avg retention
+            }
+            processed = processed.model_copy(
+                update={"lead": processed.lead.model_copy(update=opp_updates)}
+            )
             log.info(
                 "Agent processing complete",
                 score=processed.lead.score,
                 priority=processed.lead.priority,
                 category=processed.lead.category,
+                prob_close=processed.lead.probability_to_close,
+                est_revenue=processed.lead.expected_monthly_revenue,
+                ltv=processed.lead.estimated_ltv,
                 crm_saved=processed.crm_saved,
                 tool_calls=processed.agent_tool_calls,
             )

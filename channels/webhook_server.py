@@ -57,6 +57,7 @@ logger = structlog.get_logger(__name__)
 _pipeline: Optional[LeadPipeline] = None
 _wa_handler: Optional[WhatsAppChannelHandler] = None
 _wa_notifier = None  # WhatsAppNotifier — used to reply back to senders
+_proposal_manager = None  # ProposalApprovalManager
 _li_handler: Optional[LinkedInChannelHandler] = None
 _gf_handler: Optional[GoogleFormsHandler] = None
 _ws_handler: Optional[WebsiteChannelHandler] = None
@@ -79,7 +80,7 @@ _processed_leads: dict[str, ProcessedLead] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager
 
     settings = get_settings()
 
@@ -131,6 +132,17 @@ async def lifespan(app: FastAPI):
             pass
     _sla_monitor = SLAMonitor(notifier=_pipeline.notifier, supabase_client=_supabase_client)
     log.info("SLA monitor initialized")
+
+    # Initialize Proposal Approval Manager
+    if settings.is_telegram_configured() and _tg_handler:
+        from processors.proposal_generator import ProposalApprovalManager
+        _proposal_manager = ProposalApprovalManager(
+            anthropic_key=settings.ANTHROPIC_API_KEY,
+            telegram_handler=_tg_handler,
+            wa_notifier=_wa_notifier,
+            owner_chat_ids=[str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])],
+        )
+        log.info("Proposal approval manager initialized")
 
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
     _scheduler = SmartfieldScheduler(_employee, pipeline=_pipeline, sla_monitor=_sla_monitor)
@@ -381,19 +393,33 @@ async def generate_proposal(
     settings: Settings = Depends(get_settings_dep),
 ) -> dict:
     """
-    Generate an AI-powered Arabic proposal for a lead.
-    يولّد عرض سعر بالذكاء الاصطناعي للعميل.
+    Generate a proposal draft and send to owner for Telegram approval.
+    If no Telegram configured, returns the text directly.
     """
     try:
         lead_dict = req.model_dump()
-        proposal_text = await generate_proposal_text(lead_dict, settings.ANTHROPIC_API_KEY)
-        file_path = await create_and_save_proposal(lead_dict, settings.ANTHROPIC_API_KEY)
-        return {
-            "success": True,
-            "proposal_text": proposal_text,
-            "pdf_path": file_path,
-            "lead_name": req.name,
-        }
+
+        # Use approval flow if available
+        if _proposal_manager:
+            proposal_id = await _proposal_manager.request_approval(lead_dict)
+            return {
+                "success": True,
+                "status": "pending_approval",
+                "proposal_id": proposal_id,
+                "message": "العرض أُرسل للمالك عبر تيليغرام للموافقة",
+                "lead_name": req.name,
+            }
+        else:
+            # Direct generation (no approval flow)
+            proposal_text = await generate_proposal_text(lead_dict, settings.ANTHROPIC_API_KEY)
+            file_path = await create_and_save_proposal(lead_dict, settings.ANTHROPIC_API_KEY)
+            return {
+                "success": True,
+                "status": "generated",
+                "proposal_text": proposal_text,
+                "pdf_path": file_path,
+                "lead_name": req.name,
+            }
     except Exception as exc:
         logger.error("Proposal generation failed", error=str(exc))
         raise HTTPException(status_code=500, detail=str(exc))
@@ -607,6 +633,16 @@ async def _handle_telegram_message(chat_id: str, name: str, text: str):
     if not _tg_handler or not _employee:
         return
     try:
+        # Check if this is a proposal approval command first
+        if _proposal_manager and any(
+            text.strip().startswith(cmd)
+            for cmd in ("موافق", "تعديل", "رفض")
+        ):
+            result = await _proposal_manager.handle_owner_reply(text.strip())
+            if result:
+                await _tg_handler.send_message(chat_id, result)
+                return
+
         await _tg_handler.send_typing(chat_id)
         response = await _employee.handle_telegram_message(chat_id, name, text)
         await _tg_handler.send_message(chat_id, response)

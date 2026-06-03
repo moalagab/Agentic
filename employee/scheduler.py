@@ -134,17 +134,22 @@ class SmartfieldScheduler:
         try:
             from processors.prospecting_engine import ProspectingEngine
             engine = ProspectingEngine(config=self.employee.config, pipeline=self.pipeline)
-            results = await engine.run_morning_prospecting(prospects_per_segment=3)
+            results = await engine.run_morning_prospecting(target_total=104)
             logger.info(
                 "scheduler.prospecting_complete",
                 total=results.get("total_prospects", 0),
+                added=results.get("added_to_crm", 0),
                 segments=results.get("segments_covered", 0),
                 errors=len(results.get("errors", [])),
             )
-            # Send summary to owner
-            report = await engine.get_prospecting_report()
-            for phone in self.employee._owner_phones:
-                await self.employee._send_whatsapp(phone, report)
+            # Send summary to owner via Telegram (preferred) or WhatsApp
+            report = await engine.get_prospecting_report(results)
+            if self.employee.telegram and self.employee._owner_telegram_ids:
+                for chat_id in self.employee._owner_telegram_ids:
+                    await self.employee.telegram.send_message(chat_id, report)
+            else:
+                for phone in self.employee._owner_phones:
+                    await self.employee._send_whatsapp(phone, report)
         except Exception as exc:
             logger.error("scheduler.prospecting_error", error=str(exc))
 
