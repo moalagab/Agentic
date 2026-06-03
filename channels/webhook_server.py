@@ -91,13 +91,12 @@ async def lifespan(app: FastAPI):
     else:
         log.info("Telegram not configured (TELEGRAM_BOT_TOKEN missing)")
 
-    # Initialize autonomous employee
-    notifier = WhatsAppNotifier(settings)
+    # Initialize autonomous employee — use same notifier as pipeline
     _employee = AutonomousEmployee(
         config=settings,
         pipeline=_pipeline,
         crm=_pipeline.primary_crm,
-        notifier=notifier,
+        notifier=_pipeline.notifier,
         telegram=_tg_handler,
     )
 

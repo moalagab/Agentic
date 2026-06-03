@@ -243,8 +243,15 @@ class AutonomousEmployee:
     async def notify_new_lead(self, lead_dict: dict, processed_dict: dict):
         """Notify owners of a new lead and schedule follow-up."""
         alert = build_new_lead_alert(lead_dict, processed_dict)
-        for phone in self._owner_phones:
-            await self._send_whatsapp(phone, alert)
+
+        # Send via Telegram if configured (priority)
+        if self.telegram and self._owner_telegram_ids:
+            for chat_id in self._owner_telegram_ids:
+                await self.telegram.send_message(chat_id, alert)
+        else:
+            # Fallback to WhatsApp
+            for phone in self._owner_phones:
+                await self._send_whatsapp(phone, alert)
 
         lead_phone = lead_dict.get("phone", "")
         if lead_phone:
@@ -416,10 +423,10 @@ class AutonomousEmployee:
                         )
                         processed = await self.pipeline.process(lead)
                         await self.notify_new_lead(
-                            {**inp, "id": str(processed.id), "source": "WHATSAPP",
-                             "crm_id": processed.crm_id},
-                            {"priority": processed.priority.value,
-                             "score": processed.score,
+                            {**inp, "id": str(processed.lead.id), "source": "WHATSAPP",
+                             "crm_id": processed.lead.crm_id},
+                            {"priority": processed.lead.priority.value,
+                             "score": processed.lead.score,
                              "next_actions": processed.next_actions},
                         )
                         logger.info("employee.lead_captured_from_chat", phone=phone)
