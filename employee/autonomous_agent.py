@@ -46,7 +46,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-sonnet-4-6"          # used for owner commands & complex tasks
+CLAUDE_CONV_MODEL = "claude-haiku-4-5-20251001"  # used for lead conversations (fast)
 
 # ─── Employee system prompt ───────────────────────────────────────────────────
 
@@ -390,101 +391,78 @@ class AutonomousEmployee:
         self, phone: str, message: str, history: list[dict]
     ) -> str:
         """
-        Stage-aware lead conversation handler.
-        Guides the lead through: new → discovery → qualify → closing → active
+        Fast, natural lead conversation handler.
+        Single API call with haiku — CRM registration fires in background.
         """
         profile = mem.get_lead_profile(phone)
-        stage = profile.get("stage", STAGE_NEW)
         msg_count = mem.get_message_count(phone)
 
-        # Determine effective stage from context
-        stage = self._resolve_stage(stage, profile, msg_count)
-
-        stage_prompt = self._build_stage_prompt(stage, profile, phone)
-        messages = [*history[:-1], {"role": "user", "content": message}]
+        # Build a minimal 1-3 line context — trust Claude to handle the flow
+        ctx_parts = []
+        if msg_count == 0:
+            ctx_parts.append("أول رسالة من هذا العميل.")
+        summary = self._profile_summary(profile)
+        if summary != "لا شيء بعد":
+            ctx_parts.append(f"ما جُمع: {summary}")
+        if profile.get("crm_registered"):
+            ctx_parts.append("العميل مسجّل بالفعل — أجب مباشرة.")
+        ctx = "\n".join(ctx_parts)
 
         extract_tool = {
             "name": "register_lead",
             "description": (
                 "سجّل العميل في النظام عندما تجمع: الاسم + (نوع البضاعة أو المسار). "
-                "استدعِ هذه الأداة بهدوء في الخلفية بدون إخبار العميل."
+                "استدعِ بهدوء في الخلفية بدون إخبار العميل."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "اسم العميل أو المسمى الوظيفي"},
+                    "name": {"type": "string"},
                     "company": {"type": "string"},
                     "cargo_type": {"type": "string"},
                     "route_from": {"type": "string"},
                     "route_to": {"type": "string"},
                     "fleet_size": {"type": "string"},
                     "budget": {"type": "string"},
-                    "timeline": {"type": "string", "description": "متى يحتاج الخدمة"},
+                    "timeline": {"type": "string"},
                     "notes": {"type": "string"},
                 },
                 "required": ["name"],
             },
         }
 
+        messages = [*history[:-1], {"role": "user", "content": message}]
+
         response = await self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=400,
+            model=CLAUDE_CONV_MODEL,
+            max_tokens=220,
             system=[
                 {
                     "type": "text",
-                    "text": EMPLOYEE_SYSTEM_PROMPT + stage_prompt,
+                    "text": EMPLOYEE_SYSTEM_PROMPT,
                     "cache_control": {"type": "ephemeral"},
-                }
+                },
+                {
+                    "type": "text",
+                    "text": ctx,
+                },
             ],
             tools=[extract_tool],
             messages=messages,
         )
 
-        # Handle tool call — register lead silently
-        lead_registered = False
+        # Fire CRM registration in background — never block the reply
         if response.stop_reason == "tool_use":
             for block in response.content:
                 if block.type == "tool_use" and block.name == "register_lead":
-                    inp = block.input
-                    lead_registered = await self._register_lead_from_chat(phone, inp, profile)
+                    asyncio.create_task(
+                        self._register_lead_from_chat(phone, block.input, profile)
+                    )
 
-            # If Claude only called the tool with no text, get a follow-up response
-            text_response = self._extract_text(response)
-            if not text_response:
-                follow_up = await self.client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=300,
-                    system=[
-                        {
-                            "type": "text",
-                            "text": EMPLOYEE_SYSTEM_PROMPT + stage_prompt,
-                            "cache_control": {"type": "ephemeral"},
-                        }
-                    ],
-                    messages=[
-                        *messages,
-                        {"role": "assistant", "content": response.content},
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "tool_result",
-                                    "tool_use_id": next(
-                                        b.id for b in response.content if b.type == "tool_use"
-                                    ),
-                                    "content": "تم التسجيل بنجاح",
-                                }
-                            ],
-                        },
-                    ],
-                    tools=[extract_tool],
-                )
-                text_response = self._extract_text(follow_up)
-        else:
-            text_response = self._extract_text(response)
+        text_response = self._extract_text(response)
 
-        # Update profile with any new info extracted from this message
-        await self._update_profile_from_message(phone, message, profile, lead_registered)
+        # Update profile keywords from raw message (no extra API call)
+        await self._update_profile_from_message(phone, message, profile, False)
 
         if not text_response:
             text_response = "وصلت رسالتكم، سنتواصل معكم قريباً."
