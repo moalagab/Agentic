@@ -37,7 +37,11 @@ from channels.linkedin import LinkedInChannelHandler
 from channels.website import WebsiteChannelHandler
 from channels.whatsapp import WhatsAppChannelHandler
 from config import Settings, get_settings
+from employee.autonomous_agent import AutonomousEmployee
+from employee.memory import init_db
+from employee.scheduler import SmartfieldScheduler
 from models.lead import LeadCreate, LeadSource, ProcessedLead
+from notifications.whatsapp import WhatsAppNotifier
 from processors.pipeline import LeadPipeline, create_pipeline_from_config
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +52,8 @@ _wa_handler: Optional[WhatsAppChannelHandler] = None
 _li_handler: Optional[LinkedInChannelHandler] = None
 _gf_handler: Optional[GoogleFormsHandler] = None
 _ws_handler: Optional[WebsiteChannelHandler] = None
+_employee: Optional[AutonomousEmployee] = None
+_scheduler: Optional[SmartfieldScheduler] = None
 
 # In-memory store for lead lookups by internal ID (replace with DB in production)
 _processed_leads: dict[str, ProcessedLead] = {}
@@ -56,12 +62,15 @@ _processed_leads: dict[str, ProcessedLead] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _li_handler, _gf_handler, _ws_handler
+    global _pipeline, _wa_handler, _li_handler, _gf_handler, _ws_handler, _employee, _scheduler
 
     settings = get_settings()
 
     log = logger.bind(component="lifespan")
     log.info("Initializing Smartfield Lead Agent system")
+
+    # Initialize persistent memory DB
+    init_db()
 
     _pipeline = create_pipeline_from_config(settings)
 
@@ -73,15 +82,31 @@ async def lifespan(app: FastAPI):
     _gf_handler = GoogleFormsHandler()
     _ws_handler = WebsiteChannelHandler()
 
+    # Initialize autonomous employee
+    notifier = WhatsAppNotifier(settings)
+    _employee = AutonomousEmployee(
+        config=settings,
+        pipeline=_pipeline,
+        crm=_pipeline.primary_crm,
+        notifier=notifier,
+    )
+
+    # Start the autonomous scheduler (daily reports, follow-ups, etc.)
+    _scheduler = SmartfieldScheduler(_employee)
+    _scheduler.start()
+
     log.info(
         "System initialized",
         primary_crm=settings.PRIMARY_CRM,
         sales_team_count=len(settings.SALES_TEAM_WHATSAPP),
         twilio_configured=settings.is_twilio_configured(),
+        autonomous_employee="active",
     )
 
     yield
 
+    if _scheduler:
+        _scheduler.stop()
     log.info("Shutting down Smartfield Lead Agent system")
 
 
@@ -294,7 +319,9 @@ async def whatsapp_webhook(
 ) -> dict:
     """
     Receive WhatsApp Business Cloud API webhook events.
-    استقبال أحداث webhook واتساب بيزنس.
+    - Conversational messages → routed to AutonomousEmployee (responds intelligently)
+    - Structured form-like messages → routed to Lead pipeline
+    استقبال أحداث واتساب: محادثات للوكيل المستقل، نماذج لخط المعالجة.
     """
     if not _wa_handler:
         raise HTTPException(status_code=503, detail="WhatsApp handler not initialized")
@@ -302,15 +329,31 @@ async def whatsapp_webhook(
     payload = await request.json()
     log = logger.bind(endpoint="/webhook/whatsapp")
 
-    # Always return 200 quickly; process in background
-    lead_create = _wa_handler.parse_webhook(payload)
-    if lead_create:
-        log.info("WhatsApp lead received", name=lead_create.name, phone=lead_create.phone)
-        background_tasks.add_task(_run_pipeline, lead_create, pipeline)
+    # Extract raw message info for autonomous agent routing
+    raw_message = _wa_handler.extract_raw_message(payload)
+
+    if raw_message and _employee:
+        phone = raw_message.get("phone", "")
+        text = raw_message.get("text", "")
+        log.info("WhatsApp message received", phone=phone, length=len(text))
+        # Route ALL messages through the autonomous employee
+        # It decides: owner command vs lead conversation vs structured form
+        background_tasks.add_task(_handle_whatsapp_conversation, phone, text)
     else:
-        log.debug("WhatsApp webhook received but no lead extracted")
+        log.debug("WhatsApp webhook received but no message extracted")
 
     return {"status": "received"}
+
+
+async def _handle_whatsapp_conversation(phone: str, text: str):
+    """Route a WhatsApp message through the autonomous employee."""
+    if not _employee:
+        return
+    try:
+        response = await _employee.handle_incoming_whatsapp(phone, text)
+        logger.info("employee.responded", phone=phone, preview=response[:60])
+    except Exception as exc:
+        logger.error("employee.conversation_failed", phone=phone, error=str(exc))
 
 
 # ── LinkedIn Webhook ────────────────────────────────────────────────────────────

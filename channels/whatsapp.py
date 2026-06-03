@@ -193,6 +193,34 @@ class WhatsAppChannelHandler:
 
         return None
 
+    def extract_raw_message(self, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
+        """
+        Extract phone + text from a WhatsApp webhook without full lead parsing.
+        Used by the autonomous employee for conversational routing.
+        يستخرج الهاتف والنص الخام لتوجيه المحادثة للوكيل المستقل.
+        """
+        try:
+            for entry in payload.get("entry", []):
+                for change in entry.get("changes", []):
+                    value = change.get("value", {})
+                    messages = value.get("messages", [])
+                    contacts = value.get("contacts", [])
+                    for message in messages:
+                        if message.get("type") != "text":
+                            continue
+                        text = message.get("text", {}).get("body", "").strip()
+                        if not text:
+                            continue
+                        wa_id = message.get("from", "")
+                        phone = _extract_phone_from_message(wa_id)
+                        name = "WhatsApp Contact"
+                        if contacts:
+                            name = _extract_name_from_profile(contacts[0].get("profile", {}))
+                        return {"phone": phone, "text": text, "name": name}
+        except Exception as exc:
+            self._log.error("extract_raw_message failed", error=str(exc))
+        return None
+
     def verify_webhook(self, mode: str, token: str, challenge: str, verify_token: str) -> Optional[str]:
         """
         Verify WhatsApp webhook subscription challenge.
