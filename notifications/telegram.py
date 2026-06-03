@@ -21,89 +21,95 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-PRIORITY_EMOJI = {
-    "high": "🔴",
-    "medium": "🟡",
-    "low": "🟢",
+PRIORITY_LABEL = {
+    "high": "عالية",
+    "medium": "متوسطة",
+    "low": "منخفضة",
+}
+
+PRIORITY_MARKER = {
+    "high": "●",
+    "medium": "◑",
+    "low": "○",
 }
 
 CATEGORY_AR = {
-    "food_transport": "نقل مواد غذائية",
-    "pharma_transport": "نقل أدوية ومستلزمات طبية",
+    "food_transport": "نقل غذاء",
+    "pharma_transport": "نقل أدوية",
     "industrial_cold": "تبريد صناعي",
     "retail_chain": "سلاسل تجزئة",
-    "logistics_company": "شركة لوجستيات",
+    "logistics_company": "لوجستيات",
     "individual": "فرد / شركة صغيرة",
     "other": "أخرى",
 }
 
 SOURCE_AR = {
     "linkedin": "LinkedIn",
-    "website": "الموقع الإلكتروني",
+    "website": "الموقع",
     "whatsapp": "واتساب",
-    "google_forms": "نموذج Google",
+    "google_forms": "Google Forms",
     "ads": "إعلانات",
-    "manual": "إدخال يدوي",
+    "manual": "يدوي",
 }
 
 
 def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
     priority_str = str(lead.priority).lower()
-    priority_emoji = PRIORITY_EMOJI.get(priority_str, "⚪")
+    marker = PRIORITY_MARKER.get(priority_str, "◑")
+    priority_ar = PRIORITY_LABEL.get(priority_str, priority_str.upper())
     category_ar = CATEGORY_AR.get(str(lead.category).lower(), str(lead.category))
     source_ar = SOURCE_AR.get(str(lead.source).lower(), str(lead.source))
     next_action = processed.next_actions[0] if processed.next_actions else "مراجعة العميل"
 
     lines = [
-        "🚛 *عميل جديد — Smartfield*",
+        "*عميل جديد — سمارت فيلد*",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"👤 *الاسم:* {lead.name}",
+        f"الاسم: {lead.name}",
     ]
 
     if lead.company:
-        lines.append(f"🏢 *الشركة:* {lead.company}")
+        lines.append(f"الشركة: {lead.company}")
     if lead.phone:
-        lines.append(f"📱 *الهاتف:* {lead.phone}")
+        lines.append(f"الهاتف: {lead.phone}")
     if lead.email:
-        lines.append(f"📧 *البريد:* {lead.email}")
+        lines.append(f"البريد: {lead.email}")
 
-    lines.append(f"📦 *نوع البضاعة:* {lead.cargo_type or 'غير محدد'}")
+    lines.append(f"البضاعة: {lead.cargo_type or 'غير محدد'}")
 
     if lead.route_from or lead.route_to:
         route = f"{lead.route_from or '؟'} ← {lead.route_to or '؟'}"
-        lines.append(f"🗺️ *المسار:* {route}")
+        lines.append(f"المسار: {route}")
 
     if lead.fleet_size_needed:
-        lines.append(f"🚚 *عدد الشاحنات:* {lead.fleet_size_needed}")
+        lines.append(f"الشاحنات: {lead.fleet_size_needed}")
 
     if lead.budget_monthly:
-        lines.append(f"💰 *الميزانية:* {lead.budget_monthly:,.0f} ريال/شهر")
+        lines.append(f"الميزانية: {lead.budget_monthly:,.0f} ريال/شهر")
 
     lines.extend([
         "━━━━━━━━━━━━━━━━━━━━",
-        f"🏷️ *التصنيف:* {category_ar}",
-        f"⭐ *التقييم:* {lead.score}/100",
-        f"📊 *الأولوية:* {priority_emoji} {priority_str.upper()}",
-        f"📥 *المصدر:* {source_ar}",
+        f"التصنيف: {category_ar}",
+        f"التقييم: {lead.score}/100  |  {marker} {priority_ar}",
+        f"المصدر: {source_ar}",
         "━━━━━━━━━━━━━━━━━━━━",
-        f"✅ *الإجراء الفوري:*\n{next_action}",
+        f"الإجراء التالي: {next_action}",
     ])
 
     if lead.crm_id:
-        lines.append(f"\n🔗 *رقم السجل في CRM:* `{lead.crm_id}`")
+        lines.append(f"CRM: `{lead.crm_id}`")
 
     return "\n".join(lines)
 
 
 def _format_lead_summary(lead: Lead) -> str:
-    priority_emoji = PRIORITY_EMOJI.get(str(lead.priority).lower(), "⚪")
+    priority_str = str(lead.priority).lower()
+    priority_ar = PRIORITY_LABEL.get(priority_str, priority_str.upper())
     return (
-        f"📋 *ملخص العميل*\n"
+        f"*ملخص العميل*\n"
         f"الاسم: {lead.name}\n"
         f"الشركة: {lead.company or 'غير محدد'}\n"
         f"الهاتف: {lead.phone or 'غير محدد'}\n"
-        f"التقييم: {lead.score}/100\n"
-        f"الأولوية: {priority_emoji} {str(lead.priority).upper()}\n"
+        f"التقييم: {lead.score}/100  |  {priority_ar}\n"
         f"البضاعة: {lead.cargo_type or 'غير محدد'}"
     )
 

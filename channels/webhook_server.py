@@ -67,6 +67,11 @@ _followup_engine: Optional[FollowUpEngine] = None
 _booking_manager: Optional[MeetingBookingManager] = None
 _sla_monitor: Optional[SLAMonitor] = None
 
+# Deduplication: track recently processed WhatsApp message IDs (WAHA sends message + message.any)
+_processed_wa_ids: set[str] = set()
+_processed_wa_ids_order: list[str] = []  # maintain insertion order for eviction
+_WA_DEDUP_MAX = 500  # max IDs to keep in memory
+
 # In-memory store for lead lookups by internal ID (replace with DB in production)
 _processed_leads: dict[str, ProcessedLead] = {}
 
@@ -530,6 +535,23 @@ async def whatsapp_webhook(
         phone = raw_message.get("phone", "")
         text = raw_message.get("text", "")
         chat_id = raw_message.get("waha_chat_id", phone)
+
+        # Deduplicate: WAHA fires both "message" and "message.any" for the same message
+        msg_id = (
+            payload.get("payload", {}).get("id", "")
+            or payload.get("id", "")
+            or f"{phone}:{text[:40]}"
+        )
+        if msg_id and msg_id in _processed_wa_ids:
+            log.debug("WhatsApp duplicate message ignored", msg_id=msg_id)
+            return {"status": "duplicate"}
+        if msg_id:
+            _processed_wa_ids.add(msg_id)
+            _processed_wa_ids_order.append(msg_id)
+            if len(_processed_wa_ids_order) > _WA_DEDUP_MAX:
+                evict = _processed_wa_ids_order.pop(0)
+                _processed_wa_ids.discard(evict)
+
         log.info("WhatsApp message received", phone=phone, length=len(text))
         background_tasks.add_task(_handle_whatsapp_conversation, phone, text, chat_id)
     else:
