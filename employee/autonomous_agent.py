@@ -30,6 +30,7 @@ from employee.report_generator import (
 from models.lead import LeadCreate, LeadSource
 
 if TYPE_CHECKING:
+    from channels.telegram import TelegramHandler
     from config import Settings
     from crm.base import BaseCRM
     from notifications.whatsapp import WhatsAppNotifier
@@ -158,14 +159,19 @@ class AutonomousEmployee:
         pipeline: "LeadPipeline",
         crm: "BaseCRM",
         notifier: "WhatsAppNotifier",
+        telegram: "TelegramHandler | None" = None,
     ):
         self.config = config
         self.pipeline = pipeline
         self.crm = crm
         self.notifier = notifier
+        self.telegram = telegram
         self.client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self._owner_phones: set[str] = set(
             p.strip() for p in (config.SALES_TEAM_WHATSAPP or [])
+        )
+        self._owner_telegram_ids: set[str] = set(
+            str(i).strip() for i in (config.TELEGRAM_OWNER_CHAT_IDS or [])
         )
 
     # ─── Public API ───────────────────────────────────────────────────────────
@@ -475,3 +481,56 @@ class AutonomousEmployee:
             return stats.get("recent_leads", [])[:limit]
         except Exception:
             return []
+
+    # ─── Telegram support ────────────────────────────────────────────────────
+
+    async def handle_telegram_message(self, chat_id: str, name: str, text: str) -> str:
+        """
+        Entry point for all incoming Telegram messages.
+        Routes owner commands or lead conversations through the same Claude agent.
+        نقطة دخول رسائل تيليغرام - نفس منطق واتساب تماماً.
+        """
+        is_owner = self._is_telegram_owner(chat_id)
+        logger.info("employee.telegram_message", chat_id=chat_id, is_owner=is_owner)
+
+        conv_key = f"tg:{chat_id}"
+        mem.save_message(conv_key, "user", text)
+        history = mem.get_conversation_history(conv_key)
+
+        if is_owner:
+            response = await self._handle_owner_command(chat_id, text, history)
+        else:
+            response = await self._handle_lead_conversation(chat_id, text, history)
+
+        mem.save_message(conv_key, "assistant", response)
+        mem.log_action(
+            "telegram_response",
+            f"رد على {'المالك' if is_owner else 'عميل'} تيليغرام {chat_id}",
+            response[:100],
+        )
+        return response
+
+    async def notify_telegram_owners(self, message: str):
+        """Send a message to all owner Telegram chat IDs."""
+        if not self.telegram:
+            return
+        for chat_id in self._owner_telegram_ids:
+            await self.telegram.send_message(chat_id, message)
+
+    async def send_daily_report_telegram(self) -> bool:
+        """Send daily report to Telegram owners."""
+        if not self.telegram or not self._owner_telegram_ids:
+            return False
+        try:
+            stats = await self._get_pipeline_stats()
+            from employee.report_generator import build_daily_report
+            report = build_daily_report(stats)
+            await self.notify_telegram_owners(report)
+            mem.log_action("daily_report_telegram", "تقرير يومي عبر تيليغرام", "نجح")
+            return True
+        except Exception as exc:
+            logger.error("employee.telegram_report_failed", error=str(exc))
+            return False
+
+    def _is_telegram_owner(self, chat_id: str) -> bool:
+        return str(chat_id).strip() in self._owner_telegram_ids

@@ -34,6 +34,7 @@ from pydantic import BaseModel, Field
 
 from channels.google_forms import GoogleFormsHandler
 from channels.linkedin import LinkedInChannelHandler
+from channels.telegram import TelegramHandler
 from channels.website import WebsiteChannelHandler
 from channels.whatsapp import WhatsAppChannelHandler
 from config import Settings, get_settings
@@ -52,6 +53,7 @@ _wa_handler: Optional[WhatsAppChannelHandler] = None
 _li_handler: Optional[LinkedInChannelHandler] = None
 _gf_handler: Optional[GoogleFormsHandler] = None
 _ws_handler: Optional[WebsiteChannelHandler] = None
+_tg_handler: Optional[TelegramHandler] = None
 _employee: Optional[AutonomousEmployee] = None
 _scheduler: Optional[SmartfieldScheduler] = None
 
@@ -62,7 +64,7 @@ _processed_leads: dict[str, ProcessedLead] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _li_handler, _gf_handler, _ws_handler, _employee, _scheduler
+    global _pipeline, _wa_handler, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler
 
     settings = get_settings()
 
@@ -82,6 +84,13 @@ async def lifespan(app: FastAPI):
     _gf_handler = GoogleFormsHandler()
     _ws_handler = WebsiteChannelHandler()
 
+    # Initialize Telegram handler
+    if settings.is_telegram_configured():
+        _tg_handler = TelegramHandler(settings.TELEGRAM_BOT_TOKEN)
+        log.info("Telegram bot initialized")
+    else:
+        log.info("Telegram not configured (TELEGRAM_BOT_TOKEN missing)")
+
     # Initialize autonomous employee
     notifier = WhatsAppNotifier(settings)
     _employee = AutonomousEmployee(
@@ -89,6 +98,7 @@ async def lifespan(app: FastAPI):
         pipeline=_pipeline,
         crm=_pipeline.primary_crm,
         notifier=notifier,
+        telegram=_tg_handler,
     )
 
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
@@ -354,6 +364,71 @@ async def _handle_whatsapp_conversation(phone: str, text: str):
         logger.info("employee.responded", phone=phone, preview=response[:60])
     except Exception as exc:
         logger.error("employee.conversation_failed", phone=phone, error=str(exc))
+
+
+# ── Telegram Webhook ────────────────────────────────────────────────────────────
+
+@app.post("/webhook/telegram", tags=["Webhooks"])
+async def telegram_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+) -> dict:
+    """
+    Receive Telegram Bot webhook updates.
+    كل رسالة تيليغرام تأتي هنا - الوكيل يرد تلقائياً.
+    """
+    if not _tg_handler or not _employee:
+        raise HTTPException(status_code=503, detail="Telegram not configured")
+
+    payload = await request.json()
+    msg = _tg_handler.extract_message(payload)
+
+    if msg:
+        background_tasks.add_task(
+            _handle_telegram_message,
+            msg["chat_id"],
+            msg["name"],
+            msg["text"],
+        )
+
+    return {"ok": True}
+
+
+async def _handle_telegram_message(chat_id: str, name: str, text: str):
+    """Process a Telegram message through the autonomous employee and reply."""
+    if not _tg_handler or not _employee:
+        return
+    try:
+        await _tg_handler.send_typing(chat_id)
+        response = await _employee.handle_telegram_message(chat_id, name, text)
+        await _tg_handler.send_message(chat_id, response)
+        logger.info("employee.telegram_responded", chat_id=chat_id, preview=response[:60])
+    except Exception as exc:
+        logger.error("employee.telegram_failed", chat_id=chat_id, error=str(exc))
+        await _tg_handler.send_message(chat_id, "عذراً، حدث خطأ. سنعود إليك قريباً. 🙏")
+
+
+@app.post("/setup/telegram-webhook", tags=["System"])
+async def setup_telegram_webhook(
+    request: Request,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """
+    Auto-register Telegram webhook URL with Telegram servers.
+    استخدم هذا بعد النشر لربط البوت تلقائياً.
+    POST مع body: {"base_url": "https://yourdomain.com"}
+    """
+    if not _tg_handler:
+        raise HTTPException(status_code=503, detail="Telegram not configured")
+
+    body = await request.json()
+    base_url = body.get("base_url", "").rstrip("/")
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url required")
+
+    webhook_url = f"{base_url}/webhook/telegram"
+    ok = await _tg_handler.set_webhook(webhook_url)
+    return {"ok": ok, "webhook_url": webhook_url}
 
 
 # ── LinkedIn Webhook ────────────────────────────────────────────────────────────

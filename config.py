@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     APP_PORT: int = Field(default=8000, description="Server bind port")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
 
+    # ─── Telegram Bot ─────────────────────────────────────────────────────────
+    TELEGRAM_BOT_TOKEN: str = Field(
+        default="", description="Telegram Bot token from @BotFather"
+    )
+    # معرفات المالك/الفريق في تيليغرام (chat_id) لاستقبال الإشعارات والأوامر
+    TELEGRAM_OWNER_CHAT_IDS: list[str] = Field(
+        default_factory=list,
+        description="Telegram chat IDs for owners/sales team (get via @userinfobot)"
+    )
+
     # ─── Optional: Meta Ads webhook secret ───────────────────────────────────
     META_ADS_VERIFY_TOKEN: str = Field(
         default="smartfield_meta_2024",
@@ -123,6 +133,9 @@ class Settings(BaseSettings):
 
     def is_whatsapp_configured(self) -> bool:
         return bool(self.WHATSAPP_BUSINESS_TOKEN and self.WHATSAPP_PHONE_ID)
+
+    def is_telegram_configured(self) -> bool:
+        return bool(self.TELEGRAM_BOT_TOKEN)
 
 
 @lru_cache(maxsize=1)
