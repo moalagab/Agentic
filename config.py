@@ -66,6 +66,15 @@ class Settings(BaseSettings):
         description="Primary CRM to use: 'hubspot' or 'airtable'"
     )
 
+    # ─── Telegram Notifications ───────────────────────────────────────────────
+    TELEGRAM_BOT_TOKEN: str = Field(
+        default="", description="Telegram Bot token from @BotFather"
+    )
+    TELEGRAM_OWNER_CHAT_IDS: list[str] = Field(
+        default_factory=list,
+        description="Telegram chat IDs for owners/sales team (get via @userinfobot)"
+    )
+
     # ─── Sales Team Notifications ─────────────────────────────────────────────
     SALES_TEAM_WHATSAPP: list[str] = Field(
         default_factory=list,
@@ -76,16 +85,6 @@ class Settings(BaseSettings):
     APP_HOST: str = Field(default="0.0.0.0", description="Server bind host")
     APP_PORT: int = Field(default=8000, description="Server bind port")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
-
-    # ─── Telegram Bot ─────────────────────────────────────────────────────────
-    TELEGRAM_BOT_TOKEN: str = Field(
-        default="", description="Telegram Bot token from @BotFather"
-    )
-    # معرفات المالك/الفريق في تيليغرام (chat_id) لاستقبال الإشعارات والأوامر
-    TELEGRAM_OWNER_CHAT_IDS: list[str] = Field(
-        default_factory=list,
-        description="Telegram chat IDs for owners/sales team (get via @userinfobot)"
-    )
 
     # ─── Optional: Meta Ads webhook secret ───────────────────────────────────
     META_ADS_VERIFY_TOKEN: str = Field(
@@ -135,7 +134,7 @@ class Settings(BaseSettings):
         return bool(self.WHATSAPP_BUSINESS_TOKEN and self.WHATSAPP_PHONE_ID)
 
     def is_telegram_configured(self) -> bool:
-        return bool(self.TELEGRAM_BOT_TOKEN)
+        return bool(self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_OWNER_CHAT_IDS)
 
 
 @lru_cache(maxsize=1)

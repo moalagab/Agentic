@@ -222,6 +222,7 @@ def create_pipeline_from_config(config: "Settings") -> LeadPipeline:
     from agent.core import SmartfieldLeadAgent
     from crm.airtable import AirtableCRM
     from crm.hubspot import HubSpotCRM
+    from notifications.telegram import TelegramNotifier
     from notifications.whatsapp import WhatsAppNotifier
     from processors.classifier import LeadClassifier
 
@@ -261,8 +262,11 @@ def create_pipeline_from_config(config: "Settings") -> LeadPipeline:
         primary_crm = _NullCRM()
         fallback_crm = None
 
-    # ── Create notifier ───────────────────────────────────────────────────────
-    notifier = WhatsAppNotifier(config)
+    # ── Create notifier (Telegram takes priority over WhatsApp) ──────────────
+    if config.is_telegram_configured():
+        notifier = TelegramNotifier(config)
+    else:
+        notifier = WhatsAppNotifier(config)
 
     # ── Create agent ──────────────────────────────────────────────────────────
     agent = SmartfieldLeadAgent(
