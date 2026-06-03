@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # ─── Twilio / WhatsApp Notifications ─────────────────────────────────────
     TWILIO_ACCOUNT_SID: str = Field(default="", description="Twilio account SID")
     TWILIO_AUTH_TOKEN: str = Field(default="", description="Twilio auth token")
+    TWILIO_API_KEY_SID: str = Field(default="", description="Twilio API Key SID (SK...)")
+    TWILIO_API_KEY_SECRET: str = Field(default="", description="Twilio API Key Secret")
     TWILIO_WHATSAPP_FROM: str = Field(
         default="whatsapp:+14155238886",
         description="Twilio WhatsApp sender number (whatsapp:+1...)"
@@ -64,10 +66,14 @@ class Settings(BaseSettings):
         default="", description="LinkedIn OAuth app client secret"
     )
 
+    # ─── Supabase ─────────────────────────────────────────────────────────────
+    SUPABASE_URL: str = Field(default="", description="Supabase project URL (https://xxx.supabase.co)")
+    SUPABASE_KEY: str = Field(default="", description="Supabase service role key (sb_secret_...)")
+
     # ─── CRM Selection ────────────────────────────────────────────────────────
     PRIMARY_CRM: str = Field(
-        default="hubspot",
-        description="Primary CRM to use: 'hubspot' or 'airtable'"
+        default="supabase",
+        description="Primary CRM to use: 'supabase', 'hubspot', or 'airtable'"
     )
 
     # ─── Telegram Notifications ───────────────────────────────────────────────
@@ -77,6 +83,20 @@ class Settings(BaseSettings):
     TELEGRAM_OWNER_CHAT_IDS: list[str] = Field(
         default_factory=list,
         description="Telegram chat IDs for owners/sales team (get via @userinfobot)"
+    )
+
+    # ─── WAHA (WhatsApp HTTP API - self-hosted) ───────────────────────────────
+    WAHA_URL: str = Field(
+        default="http://localhost:3000",
+        description="WAHA server URL"
+    )
+    WAHA_API_KEY: str = Field(
+        default="",
+        description="WAHA API key (set via WAHA_API_KEY env var)"
+    )
+    WAHA_SESSION: str = Field(
+        default="default",
+        description="WAHA session name"
     )
 
     # ─── Sales Team Notifications ─────────────────────────────────────────────
@@ -99,7 +119,7 @@ class Settings(BaseSettings):
     @field_validator("PRIMARY_CRM")
     @classmethod
     def validate_crm(cls, v: str) -> str:
-        allowed = {"hubspot", "airtable"}
+        allowed = {"hubspot", "airtable", "supabase"}
         if v.lower() not in allowed:
             raise ValueError(f"PRIMARY_CRM must be one of {allowed}, got '{v}'")
         return v.lower()
@@ -125,6 +145,9 @@ class Settings(BaseSettings):
     def whatsapp_api_url(self) -> str:
         return f"https://graph.facebook.com/v18.0/{self.WHATSAPP_PHONE_ID}/messages"
 
+    def is_supabase_configured(self) -> bool:
+        return bool(self.SUPABASE_URL and self.SUPABASE_KEY)
+
     def is_hubspot_configured(self) -> bool:
         return bool(self.HUBSPOT_API_KEY and self.HUBSPOT_PORTAL_ID)
 
@@ -132,7 +155,21 @@ class Settings(BaseSettings):
         return bool(self.AIRTABLE_API_KEY and self.AIRTABLE_BASE_ID)
 
     def is_twilio_configured(self) -> bool:
-        return bool(self.TWILIO_ACCOUNT_SID and self.TWILIO_AUTH_TOKEN)
+        # Supports both Auth Token and API Key authentication
+        has_api_key = bool(self.TWILIO_ACCOUNT_SID and self.TWILIO_API_KEY_SID and self.TWILIO_API_KEY_SECRET)
+        has_auth_token = bool(self.TWILIO_ACCOUNT_SID and self.TWILIO_AUTH_TOKEN)
+        return has_api_key or has_auth_token
+
+    def get_twilio_client(self):
+        """Return an authenticated Twilio REST client (API Key preferred over Auth Token)."""
+        from twilio.rest import Client as TwilioClient
+        if self.TWILIO_API_KEY_SID and self.TWILIO_API_KEY_SECRET:
+            return TwilioClient(
+                self.TWILIO_API_KEY_SID,
+                self.TWILIO_API_KEY_SECRET,
+                self.TWILIO_ACCOUNT_SID,
+            )
+        return TwilioClient(self.TWILIO_ACCOUNT_SID, self.TWILIO_AUTH_TOKEN)
 
     def is_whatsapp_configured(self) -> bool:
         return bool(self.WHATSAPP_BUSINESS_TOKEN and self.WHATSAPP_PHONE_ID)

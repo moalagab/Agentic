@@ -51,22 +51,45 @@ class SmartfieldLeadAgent:
         self.client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self._log = logger.bind(component="SmartfieldLeadAgent")
 
-    async def process_lead(self, lead_create: LeadCreate) -> ProcessedLead:
+    async def process_lead(
+        self,
+        lead_create: LeadCreate,
+        pre_scored: dict[str, Any] | None = None,
+    ) -> ProcessedLead:
         """
         Main entry point: fully process a lead using the Claude agentic loop.
 
         Steps performed by the agent (Claude decides the order):
           1. search_existing_lead  - deduplicate
-          2. classify_lead         - score and categorize
+          2. classify_lead         - qualitative analysis only (score locked by HybridScorer)
           3. create_crm_lead       - persist to CRM
           4. send_whatsapp_notification - alert sales team
           5. create_follow_up_task - schedule follow-up
+
+        Args:
+            lead_create: incoming lead data
+            pre_scored: locked hybrid scoring result dict — Claude adds analysis, not score
 
         Returns a ProcessedLead with full classification data.
         """
         start_ts = time.monotonic()
         lead = lead_create.to_lead()
         tool_calls_made: list[str] = []
+
+        # Apply locked hybrid score immediately — Claude cannot override these
+        if pre_scored:
+            lead.score = pre_scored.get("score", lead.score)
+            try:
+                from models.lead import LeadCategory, LeadPriority
+                lead.category = LeadCategory(pre_scored.get("category", "other"))
+                lead.priority = LeadPriority(pre_scored.get("priority", "medium"))
+            except ValueError:
+                pass
+            # Attach financial estimates as dynamic attributes
+            for field in ("estimated_monthly_revenue", "estimated_trips",
+                          "confidence_score", "probability_to_close", "expected_deal_value"):
+                if field in pre_scored:
+                    lead.__dict__[field] = pre_scored[field]
 
         log = self._log.bind(
             lead_name=lead.name,
@@ -77,7 +100,7 @@ class SmartfieldLeadAgent:
         log.info("Starting lead processing")
 
         # ── Build the initial user message with lead data ──────────────────────
-        user_message = self._build_user_message(lead_create)
+        user_message = self._build_user_message(lead_create, pre_scored=pre_scored)
 
         messages: list[dict[str, Any]] = [
             {"role": "user", "content": user_message},
@@ -245,7 +268,11 @@ class SmartfieldLeadAgent:
     # Internal helpers
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _build_user_message(self, lead_create: LeadCreate) -> str:
+    def _build_user_message(
+        self,
+        lead_create: LeadCreate,
+        pre_scored: dict[str, Any] | None = None,
+    ) -> str:
         """Format the incoming lead data as a structured message for Claude."""
         parts = [
             "## عميل محتمل جديد - معالجة مطلوبة",
@@ -273,11 +300,33 @@ class SmartfieldLeadAgent:
         if lead_create.raw_data:
             parts.append(f"**البيانات الخام:** {json.dumps(lead_create.raw_data, ensure_ascii=False)}")
 
+        # ── Hybrid scoring section — LOCKED values, Claude adds analysis only ──
+        if pre_scored:
+            parts.extend([
+                "",
+                "---",
+                "## ⚠️ نتيجة التقييم الآلي المقفل (HybridScorer) — لا يمكن تعديل الأرقام",
+                f"**النقاط الإجمالية:** {pre_scored.get('score', 0)}/100 ← **محقونة ومقفلة**",
+                f"**الفئة:** {pre_scored.get('category', '—')}",
+                f"**الأولوية:** {pre_scored.get('priority', '—')}",
+                f"**الإيراد الشهري المتوقع:** {pre_scored.get('estimated_monthly_revenue', 0):,.0f} ريال",
+                f"**الرحلات المتوقعة:** {pre_scored.get('estimated_trips', 0)} رحلة/شهر",
+                f"**نسبة إغلاق الصفقة:** {pre_scored.get('probability_to_close', 0) * 100:.0f}%",
+                f"**قيمة الصفقة المتوقعة:** {pre_scored.get('expected_deal_value', 0):,.0f} ريال",
+                "",
+                "تفصيل التقييم:",
+                pre_scored.get("breakdown", "—"),
+                "---",
+                "",
+                "**مهمتك:** أضف فقط التحليل النوعي (classify_lead) مع تعليق على جودة العميل وخطوات المتابعة.",
+                "**لا تغير النقاط ولا الفئة ولا الأولوية** — فقط أضف reasoning وnext_actions.",
+            ])
+
         parts.extend([
             "",
             "يرجى معالجة هذا العميل باتباع الخطوات التالية:",
             "1. البحث عن العميل في قاعدة البيانات (search_existing_lead)",
-            "2. تصنيفه وتقييمه (classify_lead)",
+            "2. إضافة التحليل النوعي (classify_lead) — الدرجة مقفلة لا تغيّرها",
             "3. حفظه في نظام CRM (create_crm_lead)",
             "4. إشعار فريق المبيعات (send_whatsapp_notification)",
             "5. إنشاء مهمة المتابعة (create_follow_up_task)",

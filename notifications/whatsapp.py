@@ -2,15 +2,18 @@
 WhatsApp notification sender for the Smartfield sales team.
 إرسال إشعارات واتساب لفريق مبيعات سمارت فيلد
 
-Uses Twilio's WhatsApp API to send formatted Arabic messages
-to configured sales team phone numbers.
+Supports two backends:
+  1. WAHA (self-hosted WhatsApp HTTP API) — preferred
+  2. Twilio WhatsApp — fallback
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import TYPE_CHECKING
 
+import httpx
 import structlog
 
 from models.lead import Lead, LeadPriority, ProcessedLead
@@ -47,15 +50,10 @@ SOURCE_AR = {
 
 
 def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
-    """
-    Build a formatted Arabic WhatsApp message about a new lead.
-    يبني رسالة واتساب عربية منسقة عن عميل محتمل جديد.
-    """
     priority_str = str(lead.priority).lower()
     priority_emoji = PRIORITY_EMOJI.get(priority_str, "⚪")
     category_ar = CATEGORY_AR.get(str(lead.category).lower(), str(lead.category))
     source_ar = SOURCE_AR.get(str(lead.source).lower(), str(lead.source))
-
     next_action = processed.next_actions[0] if processed.next_actions else "مراجعة العميل"
 
     lines = [
@@ -63,7 +61,6 @@ def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
         f"👤 *الاسم:* {lead.name}",
     ]
-
     if lead.company:
         lines.append(f"🏢 *الشركة:* {lead.company}")
     if lead.phone:
@@ -71,17 +68,13 @@ def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
     if lead.email:
         lines.append(f"📧 *البريد:* {lead.email}")
 
-    lines.extend([
-        f"📦 *نوع البضاعة:* {lead.cargo_type or 'غير محدد'}",
-    ])
+    lines.append(f"📦 *نوع البضاعة:* {lead.cargo_type or 'غير محدد'}")
 
     if lead.route_from or lead.route_to:
         route = f"{lead.route_from or '؟'} ← {lead.route_to or '؟'}"
         lines.append(f"🗺️ *المسار:* {route}")
-
     if lead.fleet_size_needed:
         lines.append(f"🚚 *عدد الشاحنات:* {lead.fleet_size_needed}")
-
     if lead.budget_monthly:
         lines.append(f"💰 *الميزانية:* {lead.budget_monthly:,.0f} ريال/شهر")
 
@@ -94,7 +87,6 @@ def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
         "━━━━━━━━━━━━━━━━━━━━",
         f"✅ *الإجراء الفوري:*\n{next_action}",
     ])
-
     if lead.crm_id:
         lines.append(f"\n🔗 *رقم السجل في CRM:* `{lead.crm_id}`")
 
@@ -102,7 +94,6 @@ def _format_lead_message(lead: Lead, processed: ProcessedLead) -> str:
 
 
 def _format_lead_summary(lead: Lead) -> str:
-    """Build a shorter lead summary message."""
     priority_emoji = PRIORITY_EMOJI.get(str(lead.priority).lower(), "⚪")
     return (
         f"📋 *ملخص العميل*\n"
@@ -115,112 +106,147 @@ def _format_lead_summary(lead: Lead) -> str:
     )
 
 
+def _normalize_chat_id(phone: str) -> str:
+    """Convert phone/chatId to WAHA chatId format.
+    Accepts: +966xxx, 966xxx, 966xxx@c.us, 966xxx@lid
+    """
+    p = phone.strip()
+    # Already has @suffix — pass as-is
+    if "@" in p:
+        return p
+    # Strip + and spaces
+    num = p.lstrip("+").replace(" ", "").replace("-", "")
+    return f"{num}@c.us"
+
+
 class WhatsAppNotifier:
     """
-    Sends WhatsApp notifications to the Smartfield sales team via Twilio.
-    يرسل إشعارات واتساب لفريق مبيعات سمارت فيلد عبر Twilio.
+    Sends WhatsApp notifications via WAHA (preferred) or Twilio (fallback).
     """
 
     def __init__(self, config: "Settings") -> None:
         self.config = config
         self._log = logger.bind(component="WhatsAppNotifier")
         self._twilio_client = None
+        self._waha_enabled = False
 
-        if config.is_twilio_configured():
+        # ── WAHA ──────────────────────────────────────────────────────────────
+        if config.WAHA_API_KEY:
+            self._waha_url = config.WAHA_URL.rstrip("/")
+            self._waha_session = config.WAHA_SESSION
+            self._waha_headers = {
+                "X-Api-Key": config.WAHA_API_KEY,
+                "Content-Type": "application/json",
+            }
+            self._waha_enabled = True
+            self._log.info("WAHA notifier enabled", url=self._waha_url)
+
+        # ── Twilio fallback ────────────────────────────────────────────────────
+        elif config.is_twilio_configured():
             try:
-                from twilio.rest import Client as TwilioClient
-
-                self._twilio_client = TwilioClient(
-                    config.TWILIO_ACCOUNT_SID,
-                    config.TWILIO_AUTH_TOKEN,
-                )
-                self._log.info("Twilio client initialized")
-            except ImportError:
-                self._log.warning("Twilio package not installed; notifications disabled")
+                self._twilio_client = config.get_twilio_client()
+                self._log.info("Twilio fallback initialized")
             except Exception as exc:
-                self._log.error("Failed to initialize Twilio client", error=str(exc))
+                self._log.error("Twilio init failed", error=str(exc))
+
+    # ─── Public API ───────────────────────────────────────────────────────────
 
     async def notify_new_lead(self, lead: Lead, processed: ProcessedLead) -> None:
-        """
-        Send a new lead notification to all configured sales team numbers.
-        يرسل إشعار عميل جديد لجميع أرقام فريق المبيعات المكوّنة.
-        """
-        if not self._twilio_client:
-            self._log.warning("Twilio not configured; skipping new lead notification")
-            return
-
         if not self.config.SALES_TEAM_WHATSAPP:
             self._log.warning("No SALES_TEAM_WHATSAPP numbers configured")
             return
 
-        message_body = _format_lead_message(lead, processed)
-
-        tasks = [
-            self._send_message(phone, message_body)
-            for phone in self.config.SALES_TEAM_WHATSAPP
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
-
-        for phone, result in zip(self.config.SALES_TEAM_WHATSAPP, results):
-            if isinstance(result, Exception):
-                self._log.error("Failed to send notification", phone=phone, error=str(result))
-            else:
-                self._log.info("Notification sent", phone=phone, message_sid=result)
+        message = _format_lead_message(lead, processed)
+        tasks = [self.send_custom_message(phone, message) for phone in self.config.SALES_TEAM_WHATSAPP]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     async def send_lead_summary(self, phone: str, lead: Lead) -> bool:
-        """
-        Send a lead summary to a specific phone number.
-        يرسل ملخص عميل لرقم هاتف محدد.
-        """
-        if not self._twilio_client:
-            self._log.warning("Twilio not configured; skipping lead summary")
+        return await self.send_custom_message(phone, _format_lead_summary(lead))
+
+    async def send_custom_message(self, phone: str | None, message: str) -> bool:
+        targets = [phone] if phone else self.config.SALES_TEAM_WHATSAPP
+        results = await asyncio.gather(
+            *[self._send(t, message) for t in targets if t],
+            return_exceptions=True,
+        )
+        return all(r is True for r in results)
+
+    # ─── Internal senders ─────────────────────────────────────────────────────
+
+    async def _send(self, phone: str, body: str) -> bool:
+        if self._waha_enabled:
+            return await self._send_waha(phone, body)
+        elif self._twilio_client:
+            return bool(await self._send_twilio(phone, body))
+        else:
+            self._log.warning("No WhatsApp backend configured")
             return False
 
-        message_body = _format_lead_summary(lead)
+    async def _resolve_lid_to_cus(self, lid: str) -> str:
+        """Resolve a @lid identifier to phone@c.us via WAHA chats API."""
         try:
-            sid = await self._send_message(phone, message_body)
-            return bool(sid)
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"{self._waha_url}/api/{self._waha_session}/chats",
+                    headers=self._waha_headers,
+                )
+                if resp.status_code == 200:
+                    chats = resp.json()
+                    for chat in chats:
+                        cid = chat.get("id", {})
+                        serialized = cid.get("_serialized", "") if isinstance(cid, dict) else str(cid)
+                        if serialized == lid:
+                            name = chat.get("name", "")
+                            # Extract digits from display name like "+966 50 998 9313"
+                            digits = "".join(c for c in name if c.isdigit())
+                            if digits and len(digits) >= 9:
+                                self._log.info("LID resolved", lid=lid, phone=digits)
+                                return f"{digits}@c.us"
         except Exception as exc:
-            self._log.error("send_lead_summary failed", phone=phone, error=str(exc))
-            return False
+            self._log.warning("LID resolution failed", lid=lid, error=str(exc))
+        return lid  # fallback to original
 
-    async def send_custom_message(self, phone: str, message: str) -> bool:
-        """
-        Send any custom message to a WhatsApp number.
-        يرسل رسالة مخصصة لأي رقم واتساب.
-        """
-        if not self._twilio_client:
-            return False
+    async def _send_waha(self, phone: str, body: str) -> bool:
+        chat_id = _normalize_chat_id(phone)
+
+        # Resolve @lid to @c.us — WAHA can't send to @lid format
+        if chat_id.endswith("@lid"):
+            chat_id = await self._resolve_lid_to_cus(chat_id)
+
+        payload = {
+            "session": self._waha_session,
+            "chatId": chat_id,
+            "text": body,
+        }
         try:
-            await self._send_message(phone, message)
-            return True
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    f"{self._waha_url}/api/sendText",
+                    headers=self._waha_headers,
+                    json=payload,
+                )
+                resp.raise_for_status()
+                self._log.info("WAHA message sent", to=phone, chat_id=chat_id)
+                return True
         except Exception as exc:
-            self._log.error("send_custom_message failed", phone=phone, error=str(exc))
+            self._log.error("WAHA send failed", to=phone, error=str(exc))
             return False
 
-    async def _send_message(self, to_phone: str, body: str) -> str:
-        """
-        Execute the blocking Twilio API call in a thread pool executor
-        so we don't block the async event loop.
-        """
-        # Normalize phone number format for Twilio
+    async def _send_twilio(self, to_phone: str, body: str) -> str:
         if not to_phone.startswith("whatsapp:"):
             to_phone = f"whatsapp:{to_phone}"
-
         from_number = self.config.TWILIO_WHATSAPP_FROM
         if not from_number.startswith("whatsapp:"):
             from_number = f"whatsapp:{from_number}"
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _send() -> str:
-            message = self._twilio_client.messages.create(
-                body=body,
-                from_=from_number,
-                to=to_phone,
+            msg = self._twilio_client.messages.create(
+                body=body, from_=from_number, to=to_phone
             )
-            return message.sid
+            return msg.sid
 
         sid = await loop.run_in_executor(None, _send)
-        self._log.debug("Twilio message sent", to=to_phone, sid=sid)
+        self._log.info("Twilio message sent", to=to_phone, sid=sid)
         return sid

@@ -506,7 +506,7 @@ class AutonomousEmployee:
             )
             return msg.sid
 
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             sid = await loop.run_in_executor(None, _send)
             logger.info("employee.template_sent", phone=phone, sid=sid, content_sid=content_sid)

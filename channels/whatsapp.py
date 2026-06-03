@@ -196,10 +196,28 @@ class WhatsAppChannelHandler:
     def extract_raw_message(self, payload: dict[str, Any]) -> Optional[dict[str, Any]]:
         """
         Extract phone + text from a WhatsApp webhook without full lead parsing.
-        Used by the autonomous employee for conversational routing.
-        يستخرج الهاتف والنص الخام لتوجيه المحادثة للوكيل المستقل.
+        Supports both Meta Cloud API format and WAHA (self-hosted) format.
         """
         try:
+            # ── WAHA format ───────────────────────────────────────────────────
+            # {"event": "message", "payload": {"from": "966...@c.us", "body": "..."}}
+            if "payload" in payload and "event" in payload:
+                msg = payload.get("payload", {})
+                if msg.get("fromMe"):
+                    return None  # ignore outgoing messages
+                body = msg.get("body", "").strip()
+                if not body or msg.get("type") not in ("chat", "text", None):
+                    return None
+                raw_from = msg.get("from", "")  # e.g. "966501234567@c.us" or "xxx@lid"
+                # Keep raw_from as chatId for reply — strip @suffix for display phone
+                chat_id = raw_from
+                phone = raw_from.split("@")[0]
+                if not phone.startswith("+"):
+                    phone = f"+{phone}"
+                name = msg.get("notifyName") or msg.get("pushName") or "WhatsApp Contact"
+                return {"phone": phone, "text": body, "name": name, "waha_chat_id": chat_id}
+
+            # ── Meta Cloud API format ─────────────────────────────────────────
             for entry in payload.get("entry", []):
                 for change in entry.get("changes", []):
                     value = change.get("value", {})

@@ -59,6 +59,10 @@ class LeadPipeline:
         self.fallback_crm = fallback_crm
         self._log = logger.bind(component="LeadPipeline")
 
+        # Lazy import to avoid circular imports
+        from processors.followup_engine import FollowUpEngine
+        self.followup_engine = FollowUpEngine(config)
+
     async def process(self, lead_create: LeadCreate) -> ProcessedLead:
         """
         Main pipeline entry point.
@@ -79,16 +83,31 @@ class LeadPipeline:
 
         log.info("Pipeline started")
 
-        # ── Step 1: Pre-classify (fast, no API) ──────────────────────────────
+        # ── Step 1: Hybrid Scoring (rule-based FIRST, locked before Claude) ──
+        from processors.hybrid_scorer import HybridScorer
+        hybrid_scorer = HybridScorer()
         try:
-            pre_class = self.classifier.pre_classify(lead_create)
+            hybrid_result = hybrid_scorer.score(lead_create)
+            pre_class = {
+                "score": hybrid_result.rule_score,
+                "category": hybrid_result.category,
+                "priority": hybrid_result.priority,
+                "breakdown": hybrid_result.score_summary_ar,
+                "estimated_monthly_revenue": hybrid_result.estimated_monthly_revenue,
+                "estimated_trips": hybrid_result.estimated_trips,
+                "confidence_score": hybrid_result.confidence_score,
+                "probability_to_close": hybrid_result.probability_to_close,
+                "expected_deal_value": hybrid_result.expected_deal_value,
+            }
             log.info(
-                "Pre-classification complete",
-                score=pre_class["score"],
-                category=pre_class["category"],
+                "Hybrid scoring complete",
+                rule_score=hybrid_result.rule_score,
+                category=hybrid_result.category,
+                priority=hybrid_result.priority,
+                est_revenue=hybrid_result.estimated_monthly_revenue,
             )
         except Exception as exc:
-            log.warning("Pre-classification failed", error=str(exc))
+            log.warning("Hybrid scoring failed, using fallback", error=str(exc))
             pre_class = {"score": 30, "category": "other", "priority": "medium"}
 
         # ── Step 2: Check for duplicates ──────────────────────────────────────
@@ -107,7 +126,7 @@ class LeadPipeline:
 
         # ── Step 3: Run through AI agent (Claude) ────────────────────────────
         try:
-            processed = await self.agent.process_lead(lead_create)
+            processed = await self.agent.process_lead(lead_create, pre_scored=pre_class)
             log.info(
                 "Agent processing complete",
                 score=processed.lead.score,
@@ -124,7 +143,27 @@ class LeadPipeline:
         # ── Step 4: Ensure CRM save if agent didn't handle it ─────────────────
         if not processed.crm_saved:
             log.info("Agent did not save to CRM; attempting manual save")
+            crm_id_before = processed.lead.crm_id
             await self._manual_crm_save(processed.lead, log)
+            # If crm_id was set (or changed), the save succeeded
+            if processed.lead.crm_id:
+                processed = processed.model_copy(update={"crm_saved": True})
+
+        # ── Step 4b: Dual-write to fallback CRM (e.g. HubSpot) in background ──
+        if processed.crm_saved and self.fallback_crm:
+            asyncio.create_task(
+                self._sync_to_fallback_crm(processed.lead, log)
+            )
+
+        # ── Step 4c: Start WhatsApp follow-up sequence in background ──────────
+        if processed.crm_saved and processed.lead.phone:
+            asyncio.create_task(
+                self.followup_engine.start_sequence(
+                    lead_phone=processed.lead.phone,
+                    lead_name=processed.lead.name,
+                    priority=processed.lead.priority,
+                )
+            )
 
         # ── Step 5: Ensure notification if agent didn't send it ───────────────
         if not processed.notification_sent and self.config.SALES_TEAM_WHATSAPP:
@@ -144,6 +183,17 @@ class LeadPipeline:
         )
 
         return processed
+
+    async def _sync_to_fallback_crm(self, lead: Lead, log: Any) -> None:
+        """
+        Silently push lead to fallback CRM (HubSpot) after primary save.
+        يرسل العميل إلى HubSpot في الخلفية بعد حفظه في Supabase.
+        """
+        try:
+            crm_id = await self.fallback_crm.create_lead(lead)
+            log.info("Dual-write to fallback CRM successful", crm_id=crm_id)
+        except Exception as exc:
+            log.warning("Dual-write to fallback CRM failed", error=str(exc))
 
     async def _check_duplicate(self, lead_create: LeadCreate) -> Lead | None:
         """Search primary CRM for an existing lead."""
@@ -202,6 +252,12 @@ class LeadPipeline:
         lead.score = pre_class.get("score", 30)
         lead.notes = f"[تصنيف أولي - فشل الوكيل: {error_msg[:200]}]"
 
+        # Attach financial estimates
+        for field in ("estimated_monthly_revenue", "estimated_trips",
+                      "confidence_score", "probability_to_close", "expected_deal_value"):
+            if field in pre_class:
+                lead.__dict__[field] = pre_class[field]
+
         return ProcessedLead(
             lead=lead,
             classification_reasoning=f"Fallback classification due to agent error: {error_msg[:200]}",
@@ -222,13 +278,19 @@ def create_pipeline_from_config(config: "Settings") -> LeadPipeline:
     from agent.core import SmartfieldLeadAgent
     from crm.airtable import AirtableCRM
     from crm.hubspot import HubSpotCRM
+    from crm.supabase_crm import SupabaseCRM
     from notifications.telegram import TelegramNotifier
     from notifications.whatsapp import WhatsAppNotifier
     from processors.classifier import LeadClassifier
 
     # ── Create CRM adapters ───────────────────────────────────────────────────
+    supabase_crm: BaseCRM | None = None
     hubspot_crm: BaseCRM | None = None
     airtable_crm: BaseCRM | None = None
+
+    if config.is_supabase_configured():
+        supabase_crm = SupabaseCRM(url=config.SUPABASE_URL, key=config.SUPABASE_KEY)
+        logger.info("Supabase CRM initialized — guaranteed persistence layer active")
 
     if config.is_hubspot_configured():
         hubspot_crm = HubSpotCRM(
@@ -244,12 +306,19 @@ def create_pipeline_from_config(config: "Settings") -> LeadPipeline:
         )
 
     # Select primary and fallback CRM
-    if config.PRIMARY_CRM == "hubspot" and hubspot_crm:
+    # Supabase is always preferred as primary (guaranteed persistence)
+    if config.PRIMARY_CRM == "supabase" and supabase_crm:
+        primary_crm = supabase_crm
+        fallback_crm = hubspot_crm or airtable_crm
+    elif config.PRIMARY_CRM == "hubspot" and hubspot_crm:
         primary_crm = hubspot_crm
-        fallback_crm = airtable_crm
+        fallback_crm = supabase_crm or airtable_crm
     elif config.PRIMARY_CRM == "airtable" and airtable_crm:
         primary_crm = airtable_crm
-        fallback_crm = hubspot_crm
+        fallback_crm = supabase_crm or hubspot_crm
+    elif supabase_crm:
+        primary_crm = supabase_crm
+        fallback_crm = hubspot_crm or airtable_crm
     elif hubspot_crm:
         primary_crm = hubspot_crm
         fallback_crm = airtable_crm

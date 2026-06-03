@@ -155,11 +155,14 @@ class TelegramNotifier:
             self._log.error("send_lead_summary failed", chat_id=chat_id, error=str(exc))
             return False
 
-    async def send_custom_message(self, chat_id: str, message: str) -> bool:
+    async def send_custom_message(self, chat_id: str | None, message: str) -> bool:
+        """Send a message to a specific chat, or broadcast to all owner chats if chat_id is None."""
         if not self.is_configured():
             return False
         try:
-            await self._send_message(chat_id, message)
+            targets = [chat_id] if chat_id else self._chat_ids
+            for cid in targets:
+                await self._send_message(cid, message)
             return True
         except Exception as exc:
             self._log.error("send_custom_message failed", chat_id=chat_id, error=str(exc))
@@ -172,7 +175,6 @@ class TelegramNotifier:
                 json={
                     "chat_id": chat_id,
                     "text": text,
-                    "parse_mode": "Markdown",
                 },
             )
             resp.raise_for_status()

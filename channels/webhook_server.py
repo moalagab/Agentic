@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Any, Optional
 
 import structlog
@@ -44,18 +45,27 @@ from employee.scheduler import SmartfieldScheduler
 from models.lead import LeadCreate, LeadSource, ProcessedLead
 from notifications.whatsapp import WhatsAppNotifier
 from processors.pipeline import LeadPipeline, create_pipeline_from_config
+from processors.followup_engine import FollowUpEngine
+from processors.proposal_generator import create_and_save_proposal, generate_proposal_text
+from processors.meeting_booking import MeetingBookingManager
+from processors.sla_monitor import SLAMonitor
+from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 
 logger = structlog.get_logger(__name__)
 
 # ── Application state (initialized in lifespan) ────────────────────────────────
 _pipeline: Optional[LeadPipeline] = None
 _wa_handler: Optional[WhatsAppChannelHandler] = None
+_wa_notifier = None  # WhatsAppNotifier — used to reply back to senders
 _li_handler: Optional[LinkedInChannelHandler] = None
 _gf_handler: Optional[GoogleFormsHandler] = None
 _ws_handler: Optional[WebsiteChannelHandler] = None
 _tg_handler: Optional[TelegramHandler] = None
 _employee: Optional[AutonomousEmployee] = None
 _scheduler: Optional[SmartfieldScheduler] = None
+_followup_engine: Optional[FollowUpEngine] = None
+_booking_manager: Optional[MeetingBookingManager] = None
+_sla_monitor: Optional[SLAMonitor] = None
 
 # In-memory store for lead lookups by internal ID (replace with DB in production)
 _processed_leads: dict[str, ProcessedLead] = {}
@@ -64,7 +74,7 @@ _processed_leads: dict[str, ProcessedLead] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor
 
     settings = get_settings()
 
@@ -77,6 +87,8 @@ async def lifespan(app: FastAPI):
     _pipeline = create_pipeline_from_config(settings)
 
     _wa_handler = WhatsAppChannelHandler()
+    from notifications.whatsapp import WhatsAppNotifier
+    _wa_notifier = WhatsAppNotifier(settings)
     _li_handler = LinkedInChannelHandler(
         client_id=settings.LINKEDIN_CLIENT_ID,
         client_secret=settings.LINKEDIN_CLIENT_SECRET,
@@ -100,8 +112,23 @@ async def lifespan(app: FastAPI):
         telegram=_tg_handler,
     )
 
+    # Initialize follow-up engine and meeting booking manager
+    _followup_engine = FollowUpEngine(settings)
+    _booking_manager = MeetingBookingManager(settings, _pipeline.notifier)
+
+    # Initialize SLA monitor (uses Supabase for persistence if available)
+    _supabase_client = None
+    if settings.is_supabase_configured():
+        try:
+            from supabase import create_client
+            _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        except Exception:
+            pass
+    _sla_monitor = SLAMonitor(notifier=_pipeline.notifier, supabase_client=_supabase_client)
+    log.info("SLA monitor initialized")
+
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
-    _scheduler = SmartfieldScheduler(_employee)
+    _scheduler = SmartfieldScheduler(_employee, pipeline=_pipeline, sla_monitor=_sla_monitor)
     _scheduler.start()
 
     log.info(
@@ -204,6 +231,17 @@ async def _run_pipeline(lead_create: LeadCreate, pipeline: LeadPipeline) -> Proc
     """Execute pipeline and store result for later retrieval."""
     processed = await pipeline.process(lead_create)
     _processed_leads[processed.lead.id] = processed
+
+    # Register with SLA monitor so response time is tracked
+    if _sla_monitor:
+        _sla_monitor.register_lead(
+            lead_id=processed.lead.id,
+            name=processed.lead.name,
+            phone=processed.lead.phone or "",
+            priority=str(processed.lead.priority),
+            crm_id=processed.lead.crm_id or "",
+        )
+
     return processed
 
 
@@ -282,16 +320,163 @@ async def get_lead_status(lead_id: str) -> dict:
 async def get_analytics(
     pipeline: LeadPipeline = Depends(get_pipeline),
 ) -> dict:
-    """
-    Get pipeline analytics from the configured CRM.
-    استرداد تحليلات خط المعالجة من CRM.
-    """
+    """Get pipeline analytics from the configured CRM."""
     try:
         stats = await pipeline.primary_crm.get_pipeline_stats()
         return {"success": True, "stats": stats}
     except Exception as exc:
         logger.error("Failed to get analytics", error=str(exc))
         return {"success": False, "error": str(exc), "stats": {}}
+
+
+@app.get("/dashboard", tags=["Dashboard"], response_class=Response)
+async def revenue_dashboard() -> Response:
+    """
+    Live Revenue Dashboard — لوحة الإيرادات الحية.
+    Auto-refreshes every 2 minutes.
+    """
+    try:
+        from crm.supabase_crm import SupabaseCRM
+        settings = get_settings()
+        if settings.is_supabase_configured():
+            from supabase import create_client
+            supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            data = await get_dashboard_data(supabase)
+        else:
+            data = {
+                "total": 0, "today": 0, "week": 0, "month": 0,
+                "avg_score": 0, "avg_budget": 0, "pipeline_value": 0,
+                "by_status": {}, "by_priority": {}, "by_source": {},
+                "by_category": {}, "top_leads": [],
+                "generated_at": datetime.utcnow().isoformat(),
+            }
+        html = render_dashboard_html(data)
+        return Response(content=html, media_type="text/html; charset=utf-8")
+    except Exception as exc:
+        logger.error("Dashboard render failed", error=str(exc))
+        return Response(content=f"<h1>Dashboard Error</h1><pre>{exc}</pre>", media_type="text/html")
+
+
+class ProposalRequest(BaseModel):
+    lead_id: Optional[str] = None
+    name: str
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    cargo_type: Optional[str] = None
+    fleet_size_needed: Optional[int] = None
+    budget_monthly: Optional[float] = None
+    route_from: Optional[str] = None
+    route_to: Optional[str] = None
+    score: int = 50
+
+
+@app.post("/api/proposal", tags=["Sales"])
+async def generate_proposal(
+    req: ProposalRequest,
+    settings: Settings = Depends(get_settings_dep),
+) -> dict:
+    """
+    Generate an AI-powered Arabic proposal for a lead.
+    يولّد عرض سعر بالذكاء الاصطناعي للعميل.
+    """
+    try:
+        lead_dict = req.model_dump()
+        proposal_text = await generate_proposal_text(lead_dict, settings.ANTHROPIC_API_KEY)
+        file_path = await create_and_save_proposal(lead_dict, settings.ANTHROPIC_API_KEY)
+        return {
+            "success": True,
+            "proposal_text": proposal_text,
+            "pdf_path": file_path,
+            "lead_name": req.name,
+        }
+    except Exception as exc:
+        logger.error("Proposal generation failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class BookingRequest(BaseModel):
+    lead_phone: str
+    lead_name: str
+
+
+@app.post("/api/book-meeting", tags=["Sales"])
+async def book_meeting(req: BookingRequest) -> dict:
+    """
+    Initiate meeting booking for a lead via WhatsApp.
+    يبدأ عملية حجز اجتماع للعميل عبر واتساب.
+    """
+    if not _booking_manager:
+        raise HTTPException(status_code=503, detail="Booking manager not initialized")
+    success = await _booking_manager.initiate_booking(req.lead_phone, req.lead_name)
+    return {"success": success, "message": "Booking invitation sent" if success else "Failed to send"}
+
+
+@app.post("/api/lead/{lead_id}/responded", tags=["Leads"])
+async def mark_lead_responded(lead_id: str) -> dict:
+    """
+    Mark a lead as responded (resets SLA timer).
+    يُعلّم العميل باعتباره تم التواصل معه — يوقف مؤقت SLA.
+    """
+    if not _sla_monitor:
+        raise HTTPException(status_code=503, detail="SLA monitor not initialized")
+    response_time = _sla_monitor.mark_responded(lead_id)
+    if response_time is None:
+        raise HTTPException(status_code=404, detail="Lead not tracked by SLA monitor")
+    return {"lead_id": lead_id, "response_time_minutes": response_time}
+
+
+@app.get("/api/sla/stats", tags=["Analytics"])
+async def get_sla_stats() -> dict:
+    """Return SLA compliance statistics."""
+    if not _sla_monitor:
+        return {"error": "SLA monitor not initialized"}
+    return _sla_monitor.get_sla_stats()
+
+
+@app.post("/api/lead/{lead_id}/stage", tags=["Leads"])
+async def update_lead_stage(lead_id: str, body: dict) -> dict:
+    """
+    Move a lead to a new deal pipeline stage.
+    ينقل العميل إلى مرحلة جديدة في خط الصفقات.
+    """
+    new_stage = body.get("stage")
+    if not new_stage:
+        raise HTTPException(status_code=400, detail="stage field required")
+
+    pipeline = _pipeline
+    if not pipeline:
+        raise HTTPException(status_code=503, detail="Pipeline not initialized")
+
+    # Only SupabaseCRM has update_deal_stage
+    from crm.supabase_crm import SupabaseCRM
+    if isinstance(pipeline.primary_crm, SupabaseCRM):
+        ok = await pipeline.primary_crm.update_deal_stage(
+            lead_id=lead_id,
+            new_stage=new_stage,
+            changed_by=body.get("changed_by", "api"),
+            notes=body.get("notes", ""),
+        )
+        return {"success": ok, "lead_id": lead_id, "new_stage": new_stage}
+
+    return {"success": False, "error": "Primary CRM does not support deal stages"}
+
+
+class FollowUpRequest(BaseModel):
+    lead_phone: str
+    lead_name: str
+    priority: str = "medium"
+
+
+@app.post("/api/followup/start", tags=["Sales"])
+async def start_followup_sequence(req: FollowUpRequest) -> dict:
+    """
+    Start the WhatsApp follow-up sequence for a lead.
+    يبدأ سلسلة المتابعة عبر واتساب.
+    """
+    if not _followup_engine:
+        raise HTTPException(status_code=503, detail="Follow-up engine not initialized")
+    await _followup_engine.start_sequence(req.lead_phone, req.lead_name, req.priority)
+    return {"success": True, "message": f"Follow-up sequence started for {req.lead_name}"}
 
 
 # ── WhatsApp Webhook ───────────────────────────────────────────────────────────
@@ -344,23 +529,25 @@ async def whatsapp_webhook(
     if raw_message and _employee:
         phone = raw_message.get("phone", "")
         text = raw_message.get("text", "")
+        chat_id = raw_message.get("waha_chat_id", phone)
         log.info("WhatsApp message received", phone=phone, length=len(text))
-        # Route ALL messages through the autonomous employee
-        # It decides: owner command vs lead conversation vs structured form
-        background_tasks.add_task(_handle_whatsapp_conversation, phone, text)
+        background_tasks.add_task(_handle_whatsapp_conversation, phone, text, chat_id)
     else:
         log.debug("WhatsApp webhook received but no message extracted")
 
     return {"status": "received"}
 
 
-async def _handle_whatsapp_conversation(phone: str, text: str):
-    """Route a WhatsApp message through the autonomous employee."""
+async def _handle_whatsapp_conversation(phone: str, text: str, chat_id: str = None):
+    """Route a WhatsApp message through the autonomous employee then reply via WhatsApp."""
     if not _employee:
         return
+    reply_to = chat_id or phone
     try:
         response = await _employee.handle_incoming_whatsapp(phone, text)
         logger.info("employee.responded", phone=phone, preview=response[:60])
+        if response and _wa_notifier:
+            await _wa_notifier.send_custom_message(reply_to, response)
     except Exception as exc:
         logger.error("employee.conversation_failed", phone=phone, error=str(exc))
 
