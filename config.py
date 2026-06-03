@@ -41,6 +41,10 @@ class Settings(BaseSettings):
         default="whatsapp:+14155238886",
         description="Twilio WhatsApp sender number (whatsapp:+1...)"
     )
+    TWILIO_FOLLOWUP_TEMPLATE_SID: str = Field(
+        default="",
+        description="Twilio Content SID for follow-up template (HXxxx...)"
+    )
 
     # ─── WhatsApp Business Cloud API ─────────────────────────────────────────
     WHATSAPP_BUSINESS_TOKEN: str = Field(

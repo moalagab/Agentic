@@ -209,8 +209,21 @@ class AutonomousEmployee:
         sent = 0
         for fu in due:
             try:
-                msg = build_follow_up_message(fu["lead_name"] or "عزيزي العميل", fu["attempts"])
-                await self._send_whatsapp(fu["lead_phone"], msg)
+                lead_name = fu["lead_name"] or "عزيزي العميل"
+                # Attempt 0: send approved Template (appointment reminder style)
+                if fu["attempts"] == 0 and self.config.TWILIO_FOLLOWUP_TEMPLATE_SID:
+                    sent_ok = await self._send_whatsapp_template(
+                        phone=fu["lead_phone"],
+                        content_sid=self.config.TWILIO_FOLLOWUP_TEMPLATE_SID,
+                        variables={"1": lead_name, "2": "سمارت فيلد"},
+                    )
+                    if not sent_ok:
+                        # Fallback to plain text if template fails
+                        msg = build_follow_up_message(lead_name, fu["attempts"])
+                        await self._send_whatsapp(fu["lead_phone"], msg)
+                else:
+                    msg = build_follow_up_message(lead_name, fu["attempts"])
+                    await self._send_whatsapp(fu["lead_phone"], msg)
                 next_days = None if fu["attempts"] >= 2 else (3 if fu["attempts"] == 0 else 7)
                 mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
                 mem.log_action(
@@ -454,6 +467,53 @@ class AutonomousEmployee:
     async def _send_whatsapp(self, phone: str, message: str):
         """Send a WhatsApp message via the notifier's send_custom_message."""
         await self.notifier.send_custom_message(phone, message)
+
+    async def _send_whatsapp_template(
+        self,
+        phone: str,
+        content_sid: str,
+        variables: dict,
+    ) -> bool:
+        """
+        Send a Twilio-approved WhatsApp Template message.
+        يرسل رسالة Template واتساب معتمدة عبر Twilio.
+
+        Args:
+            phone: recipient number in E.164 format (+966...)
+            content_sid: Twilio Content SID (HXxxx...)
+            variables: template variable values e.g. {"1": "12/1", "2": "3pm"}
+        """
+        if not self.config.is_twilio_configured():
+            logger.warning("employee.template_skipped", reason="Twilio not configured")
+            return False
+
+        import json as _json
+
+        from_number = self.config.TWILIO_WHATSAPP_FROM
+        if not from_number.startswith("whatsapp:"):
+            from_number = f"whatsapp:{from_number}"
+
+        to_number = phone if phone.startswith("whatsapp:") else f"whatsapp:{phone}"
+
+        def _send():
+            from twilio.rest import Client
+            client = Client(self.config.TWILIO_ACCOUNT_SID, self.config.TWILIO_AUTH_TOKEN)
+            msg = client.messages.create(
+                from_=from_number,
+                to=to_number,
+                content_sid=content_sid,
+                content_variables=_json.dumps(variables),
+            )
+            return msg.sid
+
+        loop = asyncio.get_event_loop()
+        try:
+            sid = await loop.run_in_executor(None, _send)
+            logger.info("employee.template_sent", phone=phone, sid=sid, content_sid=content_sid)
+            return True
+        except Exception as exc:
+            logger.error("employee.template_failed", phone=phone, error=str(exc))
+            return False
 
     def _build_proposal(self, lead_name: str, cargo_type: str | None) -> str:
         cargo_line = f"خاصة لـ **{cargo_type}**" if cargo_type else ""
