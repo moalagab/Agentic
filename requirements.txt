@@ -94,6 +94,7 @@ typing_extensions==4.15.0
 tzdata==2026.2
 tzlocal==5.3.1
 urllib3==2.6.3
+outscraper>=2.0.0
 uvicorn==0.48.0
 watchfiles==1.2.0
 weasyprint==69.0

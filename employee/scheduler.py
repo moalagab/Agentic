@@ -176,7 +176,17 @@ class SmartfieldScheduler:
             misfire_grace_time=600,
         )
 
-        logger.info("scheduler.jobs_registered", count=10)
+        # Google Maps prospecting — every day at 8:15 AM (real businesses with phone numbers)
+        self.scheduler.add_job(
+            self._run_google_maps_prospecting,
+            CronTrigger(hour=8, minute=15, timezone=RIYADH_TZ),
+            id="google_maps_prospecting",
+            name="البحث عن عملاء حقيقيين — Google Maps",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        logger.info("scheduler.jobs_registered", count=11)
 
     async def _run_morning_prospecting(self):
         logger.info("scheduler.running_morning_prospecting")
@@ -340,6 +350,58 @@ class SmartfieldScheduler:
                         await self.employee._send_whatsapp(phone, summary)
         except Exception as exc:
             logger.error("scheduler.outbound_sender_error", error=str(exc))
+
+    async def _run_google_maps_prospecting(self):
+        """
+        يبحث عن أماكن تجارية حقيقية عبر Google Maps Places API،
+        يصنّفها بـ Claude، ويرسل قائمة الموافقة للمالك.
+        يعمل 8:15 ص يومياً — بعد بدء Claude Prospecting بـ 15 دقيقة.
+        """
+        logger.info("scheduler.running_google_maps_prospecting")
+
+        config = self.employee.config
+        if not getattr(config, "OUTSCRAPER_API_KEY", ""):
+            logger.warning(
+                "scheduler.google_maps_skipped",
+                reason="OUTSCRAPER_API_KEY غير مضبوط في .env",
+            )
+            return
+
+        if not self.pipeline:
+            logger.warning("scheduler.google_maps_skipped", reason="pipeline not set")
+            return
+
+        crm = getattr(self.pipeline, "primary_crm", None)
+        if not crm:
+            logger.warning("scheduler.google_maps_skipped", reason="primary_crm not set")
+            return
+
+        try:
+            from processors.google_maps_engine import run_prospecting_engine
+
+            # دالة الإشعار — ترسل رسالة الموافقة اليومية للمالك
+            async def notify(message: str):
+                if self.employee.telegram and self.employee._owner_telegram_ids:
+                    for chat_id in self.employee._owner_telegram_ids:
+                        await self.employee.telegram.send_message(chat_id, message)
+                else:
+                    for phone in self.employee._owner_phones:
+                        await self.employee._send_whatsapp(phone, message)
+
+            results = await run_prospecting_engine(
+                outscraper_api_key=config.OUTSCRAPER_API_KEY,
+                crm=crm,
+                notify_callback=notify,
+                gemini_api_key=getattr(config, "GEMINI_API_KEY", ""),
+            )
+
+            logger.info(
+                "scheduler.google_maps_prospecting_complete",
+                new_leads=len(results),
+            )
+
+        except Exception as exc:
+            logger.error("scheduler.google_maps_prospecting_error", error=str(exc))
 
     async def _run_content_plan(self):
         """Generate weekly content plan and send to owner (Layer 7)."""

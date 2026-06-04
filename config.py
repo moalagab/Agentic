@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     # ─── Anthropic / Claude ───────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = Field(..., description="Anthropic API key for Claude")
 
+    # ─── Outscraper (Google Maps data) ───────────────────────────────────────
+    OUTSCRAPER_API_KEY: str = Field(default="", description="Outscraper API key — outscraper.com")
+
+    # ─── Gemini (Claude fallback) ─────────────────────────────────────────────
+    GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key — aistudio.google.com")
+
     # ─── HubSpot CRM ─────────────────────────────────────────────────────────
     HUBSPOT_API_KEY: str = Field(default="", description="HubSpot private app API key")
     HUBSPOT_PORTAL_ID: str = Field(default="", description="HubSpot portal/account ID")
