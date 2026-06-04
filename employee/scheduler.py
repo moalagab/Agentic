@@ -142,7 +142,7 @@ class SmartfieldScheduler:
                 segments=results.get("segments_covered", 0),
                 errors=len(results.get("errors", [])),
             )
-            # Send summary to owner via Telegram (preferred) or WhatsApp
+            # 1. Send summary report
             report = await engine.get_prospecting_report(results)
             if self.employee.telegram and self.employee._owner_telegram_ids:
                 for chat_id in self.employee._owner_telegram_ids:
@@ -150,6 +150,17 @@ class SmartfieldScheduler:
             else:
                 for phone in self.employee._owner_phones:
                     await self.employee._send_whatsapp(phone, report)
+
+            # 2. Send outreach briefing (top 10 with ready messages)
+            top_prospects = results.get("top_prospects", [])
+            if top_prospects:
+                briefing = engine.build_outreach_briefing(top_prospects, top_n=10)
+                if self.employee.telegram and self.employee._owner_telegram_ids:
+                    for chat_id in self.employee._owner_telegram_ids:
+                        await self.employee.telegram.send_message(chat_id, briefing)
+                else:
+                    for phone in self.employee._owner_phones:
+                        await self.employee._send_whatsapp(phone, briefing)
         except Exception as exc:
             logger.error("scheduler.prospecting_error", error=str(exc))
 

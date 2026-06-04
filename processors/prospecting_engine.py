@@ -238,6 +238,7 @@ class ProspectingEngine:
             "added_to_crm": 0,
             "errors": [],
             "date": datetime.utcnow().strftime("%Y-%m-%d"),
+            "top_prospects": [],  # enriched with outreach_message for briefing
         }
 
         # Run segments in parallel batches of 3 to avoid rate limits
@@ -262,11 +263,18 @@ class ProspectingEngine:
                 results["total_prospects"] += len(prospects)
                 results["segments_covered"] += 1
 
-                # Submit to pipeline
+                # Submit to pipeline + collect enriched prospects for briefing
                 for p in prospects:
                     ok = await self._submit_prospect(p, segment)
                     if ok:
                         results["added_to_crm"] += 1
+                        # Enrich for briefing (keep top-scored ones)
+                        from agent.cold_outreach import build_outreach_for_prospect
+                        results["top_prospects"].append({
+                            **p,
+                            "segment_ar": segment["name_ar"],
+                            "outreach_message": build_outreach_for_prospect(p, segment["id"]),
+                        })
 
             await asyncio.sleep(2)  # Rate limit buffer between batches
 
@@ -306,17 +314,21 @@ class ProspectingEngine:
         return []
 
     async def _submit_prospect(self, prospect: dict, segment: dict) -> bool:
-        """Submit a discovered prospect to the lead pipeline."""
+        """Submit a discovered prospect to the lead pipeline with a ready outreach message."""
+        from agent.cold_outreach import build_outreach_for_prospect
         from models.lead import LeadCreate, LeadSource
 
         try:
             fleet = int(prospect.get("fleet_est") or 1)
             budget = float(prospect.get("budget_sar") or 0)
 
+            # Build personalised cold outreach message for this prospect
+            outreach_msg = build_outreach_for_prospect(prospect, segment["id"])
+
             lead_create = LeadCreate(
                 name=prospect.get("company", "شركة محتملة"),
                 company=prospect.get("company"),
-                phone="+966500000000",  # placeholder — needs manual research or web lookup
+                phone="+966500000000",  # placeholder — owner enriches via command
                 source=LeadSource.MANUAL,
                 cargo_type=prospect.get("activity", segment["name_ar"]),
                 fleet_size_needed=fleet,
@@ -335,6 +347,8 @@ class ProspectingEngine:
                     "city": prospect.get("city", ""),
                     "outreach_strategy": prospect.get("outreach", ""),
                     "cold_need": prospect.get("cold_need", ""),
+                    "outreach_message": outreach_msg,
+                    "outreach_status": "ready",  # ready / sent / replied / converted
                     "generated_at": datetime.utcnow().isoformat(),
                 },
             )
@@ -345,6 +359,39 @@ class ProspectingEngine:
         except Exception as exc:
             self._log.warning("Failed to submit prospect", company=prospect.get("company"), error=str(exc))
             return False
+
+    def build_outreach_briefing(self, prospects_with_messages: list[dict], top_n: int = 10) -> str:
+        """
+        Build a daily outreach briefing for the owner.
+        Shows top N prospects with their ready-to-send messages.
+        يبني بريفينج يومي للمالك بأفضل الفرص ورسائلهم الجاهزة.
+        """
+        if not prospects_with_messages:
+            return "لا توجد فرص اليوم للمتابعة."
+
+        # Sort by prospect score descending
+        sorted_p = sorted(
+            prospects_with_messages,
+            key=lambda x: x.get("score", 0),
+            reverse=True,
+        )[:top_n]
+
+        lines = [
+            f"*أفضل {len(sorted_p)} فرص اليوم — جاهزة للإرسال*",
+            "━━━━━━━━━━━━━━",
+        ]
+
+        for i, p in enumerate(sorted_p, 1):
+            lines.append(
+                f"\n*{i}. {p['company']}* — {p.get('city', '')} | {p.get('segment_ar', '')}"
+            )
+            lines.append(f"التقييم: {p.get('score', '—')}/100  |  تواصل: {p.get('outreach', '—')}")
+            lines.append(f"الرسالة:")
+            lines.append(f"```\n{p['outreach_message']}\n```")
+            lines.append("─────")
+
+        lines.append("\n_أضف الرقم بالأمر: «أضف رقم [اسم الشركة]: 0501234567»_")
+        return "\n".join(lines)
 
     async def get_prospecting_report(self, results: dict | None = None) -> str:
         """Generate a concise report of today's prospecting."""
