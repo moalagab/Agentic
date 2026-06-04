@@ -446,7 +446,7 @@ class AutonomousEmployee:
             ctx_parts.append(f"ما جُمع: {summary}")
         if profile.get("crm_registered"):
             ctx_parts.append("العميل مسجّل بالفعل — أجب مباشرة.")
-        ctx = "\n".join(ctx_parts)
+        ctx = "\n".join(ctx_parts) if ctx_parts else "محادثة جديدة."
 
         extract_tool = {
             "name": "register_lead",
