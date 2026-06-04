@@ -735,6 +735,11 @@ class AutonomousEmployee:
                     "next_actions": processed.next_actions,
                 },
             )
+            # Log activity in Supabase
+            if hasattr(self.crm, "log_activity"):
+                asyncio.create_task(self.crm.log_activity(
+                    str(processed.lead.id), "message", "done", "تسجيل عميل من واتساب"
+                ))
             logger.info("employee.lead_registered_from_chat", phone=phone)
             return True
         except Exception as exc:

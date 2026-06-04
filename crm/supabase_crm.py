@@ -367,6 +367,88 @@ class SupabaseCRM(BaseCRM):
         except Exception as exc:
             self._log.warning("Failed to log notification", error=str(exc))
 
+    async def log_conversation(self, lead_id: str, message: str, role: str) -> None:
+        """Insert a message into the conversations table."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.client.table("conversations").insert({
+                    "lead_id": lead_id,
+                    "message": message,
+                    "role": role,
+                }).execute()
+            )
+        except Exception as exc:
+            self._log.warning("conversations.insert failed", error=str(exc))
+
+    async def log_activity(self, lead_id: str, activity_type: str, status: str = "done", notes: str = "") -> None:
+        """Insert a row into activities (call, follow_up, quote, message, meeting)."""
+        try:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.client.table("activities").insert({
+                    "lead_id": lead_id,
+                    "type": activity_type,
+                    "status": status,
+                    "notes": notes,
+                }).execute()
+            )
+        except Exception as exc:
+            self._log.warning("activities.insert failed", error=str(exc))
+
+    async def upsert_deal(self, lead_id: str, value: float, stage: str, probability: float) -> None:
+        """Create or update a deal row for a lead."""
+        try:
+            now = datetime.utcnow().isoformat()
+            existing = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.client.table("deals").select("id").eq("lead_id", lead_id).limit(1).execute()
+            )
+            if existing.data:
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self.client.table("deals").update({
+                        "value": value, "stage": stage,
+                        "probability": probability, "updated_at": now,
+                    }).eq("lead_id", lead_id).execute()
+                )
+            else:
+                await asyncio.get_running_loop().run_in_executor(
+                    None,
+                    lambda: self.client.table("deals").insert({
+                        "lead_id": lead_id, "value": value,
+                        "stage": stage, "probability": probability,
+                    }).execute()
+                )
+        except Exception as exc:
+            self._log.warning("deals.upsert failed", error=str(exc))
+
+    async def add_outbound_lead(self, data: dict) -> str:
+        """Insert a prospect into outbound_leads table."""
+        try:
+            row = {
+                "company_name": data.get("company_name", ""),
+                "industry": data.get("industry"),
+                "contact": data.get("contact"),
+                "phone": data.get("phone"),
+                "email": data.get("email"),
+                "city": data.get("city"),
+                "score": data.get("score", 0),
+                "source": data.get("source", "prospecting"),
+                "outreach_message": data.get("outreach_message"),
+                "raw_data": data.get("raw_data", {}),
+            }
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.client.table("outbound_leads").insert(row).execute()
+            )
+            if result.data:
+                return result.data[0]["id"]
+            return ""
+        except Exception as exc:
+            self._log.warning("outbound_leads.insert failed", error=str(exc))
+            return ""
+
     async def _log_event(self, lead_id: str, event_type: str, data: dict) -> None:
         """Insert a row into lead_events for audit trail."""
         try:
