@@ -26,6 +26,7 @@ from employee import memory as mem
 from employee.report_generator import (
     build_daily_report,
     build_follow_up_message,
+    build_greeting_followup_message,
     build_new_lead_alert,
 )
 from models.lead import LeadCreate, LeadSource
@@ -228,31 +229,60 @@ class AutonomousEmployee:
         sent = 0
         for fu in due:
             try:
-                lead_name = fu["lead_name"] or "عزيزي العميل"
-                # Attempt 0: send approved Template (appointment reminder style)
-                if fu["attempts"] == 0 and self.config.TWILIO_FOLLOWUP_TEMPLATE_SID:
-                    sent_ok = await self._send_whatsapp_template(
-                        phone=fu["lead_phone"],
-                        content_sid=self.config.TWILIO_FOLLOWUP_TEMPLATE_SID,
-                        variables={"1": lead_name, "2": "سمارت فيلد"},
+                phone = fu["lead_phone"]
+
+                # Check if they replied since the follow-up was scheduled
+                # (msg_count > 2 means they engaged after the greeting)
+                msg_count = mem.get_message_count(phone)
+                profile = mem.get_lead_profile(phone)
+
+                is_greeting_only = fu.get("stage", "").startswith("greeting_only")
+
+                # Skip if they already engaged (more than the greeting exchange)
+                # or already registered in CRM
+                if profile.get("crm_registered") or msg_count > 2:
+                    mem.mark_follow_up_done(fu["id"], notes="عميل تفاعل — لا حاجة للمتابعة")
+                    continue
+
+                if is_greeting_only:
+                    # Greeting-only contact: no name collected — warm, open message
+                    msg = build_greeting_followup_message(fu["attempts"])
+                    await self._send_whatsapp(phone, msg)
+                    # One more attempt after 48h, then stop
+                    next_days = 2 if fu["attempts"] == 0 else None
+                    mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
+                    mem.log_action(
+                        "greeting_follow_up",
+                        f"متابعة تحية مع {phone} (محاولة {fu['attempts']+1})",
+                        "تم الإرسال",
+                        fu["lead_id"],
                     )
-                    if not sent_ok:
-                        # Fallback to plain text if template fails
-                        msg = build_follow_up_message(lead_name, fu["attempts"])
-                        await self._send_whatsapp(fu["lead_phone"], msg)
                 else:
-                    msg = build_follow_up_message(lead_name, fu["attempts"])
-                    await self._send_whatsapp(fu["lead_phone"], msg)
-                next_days = None if fu["attempts"] >= 2 else (3 if fu["attempts"] == 0 else 7)
-                mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
-                mem.log_action(
-                    "proactive_follow_up",
-                    f"متابعة تلقائية مع {fu['lead_name']} (محاولة {fu['attempts']+1})",
-                    "تم الإرسال",
-                    fu["lead_id"],
-                )
+                    # Named/qualified lead follow-up
+                    lead_name = fu["lead_name"] or "عزيزي العميل"
+                    if fu["attempts"] == 0 and self.config.TWILIO_FOLLOWUP_TEMPLATE_SID:
+                        sent_ok = await self._send_whatsapp_template(
+                            phone=phone,
+                            content_sid=self.config.TWILIO_FOLLOWUP_TEMPLATE_SID,
+                            variables={"1": lead_name, "2": "سمارت فيلد"},
+                        )
+                        if not sent_ok:
+                            msg = build_follow_up_message(lead_name, fu["attempts"])
+                            await self._send_whatsapp(phone, msg)
+                    else:
+                        msg = build_follow_up_message(lead_name, fu["attempts"])
+                        await self._send_whatsapp(phone, msg)
+                    next_days = None if fu["attempts"] >= 2 else (3 if fu["attempts"] == 0 else 7)
+                    mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
+                    mem.log_action(
+                        "proactive_follow_up",
+                        f"متابعة تلقائية مع {fu['lead_name']} (محاولة {fu['attempts']+1})",
+                        "تم الإرسال",
+                        fu["lead_id"],
+                    )
+
                 sent += 1
-                await asyncio.sleep(1)  # avoid rate limiting
+                await asyncio.sleep(1)
             except Exception as exc:
                 logger.error("employee.follow_up_failed", lead_id=fu["lead_id"], error=str(exc))
         logger.info("employee.follow_ups_sent", count=sent)
@@ -473,6 +503,18 @@ class AutonomousEmployee:
 
         # Update profile keywords from raw message (no extra API call)
         await self._update_profile_from_message(phone, message, profile, False)
+
+        # After the very first message — schedule a 6h follow-up in case they go silent
+        # Only if no useful data collected yet (greeting-only contact)
+        if msg_count == 0 and not profile.get("crm_registered"):
+            mem.schedule_follow_up(
+                lead_id=f"wa:{phone}",
+                lead_name="",
+                lead_phone=phone,
+                crm_id=None,
+                hours_until=6,
+                stage="greeting_only",
+            )
 
         if not text_response:
             text_response = "وصلت رسالتكم، سنتواصل معكم قريباً."

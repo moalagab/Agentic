@@ -103,6 +103,25 @@ def build_new_lead_alert(lead_data: dict, processed_data: dict) -> str:
     return "\n".join(lines)
 
 
+def build_greeting_followup_message(attempt: int) -> str:
+    """
+    Follow-up for contacts who sent a greeting but never shared their need.
+    No name collected — keep it warm and open, never pushy.
+    """
+    messages = [
+        # 6 hours after greeting — soft nudge
+        (
+            "هلا، تواصلت معنا اليوم — إذا عندك أي احتياج للنقل المبرد نقدر نساعدك."
+        ),
+        # 48 hours — final attempt, door open
+        (
+            "السلام عليكم، آخر رسالة منا — إذا احتجت شاحنات مبردة في أي وقت، سمارت فيلد هنا."
+        ),
+    ]
+    idx = min(attempt, len(messages) - 1)
+    return messages[idx]
+
+
 def build_follow_up_message(lead_name: str, attempt: int) -> str:
     """Build a follow-up WhatsApp message to a lead."""
     messages = [

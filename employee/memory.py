@@ -191,8 +191,13 @@ def schedule_follow_up(
     lead_phone: str,
     crm_id: str | None,
     days_until: int = 2,
+    hours_until: int | None = None,
+    stage: str = "initial",
 ):
-    next_follow_up = (datetime.utcnow() + timedelta(days=days_until)).isoformat()
+    if hours_until is not None:
+        next_follow_up = (datetime.utcnow() + timedelta(hours=hours_until)).isoformat()
+    else:
+        next_follow_up = (datetime.utcnow() + timedelta(days=days_until)).isoformat()
     with _get_conn() as conn:
         existing = conn.execute(
             "SELECT id FROM lead_follow_ups WHERE lead_id=? AND status='pending'",
@@ -208,7 +213,7 @@ def schedule_follow_up(
                 """INSERT INTO lead_follow_ups
                    (lead_id, lead_name, lead_phone, crm_id, stage, next_follow_up, created_at)
                    VALUES (?,?,?,?,?,?,?)""",
-                (lead_id, lead_name, lead_phone, crm_id, "initial", next_follow_up,
+                (lead_id, lead_name, lead_phone, crm_id, stage, next_follow_up,
                  datetime.utcnow().isoformat()),
             )
 
