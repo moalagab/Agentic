@@ -1,0 +1,25 @@
+[Unit]
+Description=Smart Field Lead Generation Agent — RevOS v6
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=smartfield
+Group=smartfield
+WorkingDirectory=/home/smartfield/app
+ExecStart=/home/smartfield/app/.venv/bin/uvicorn channels.webhook_server:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/smartfield/app/logs/app.log
+StandardError=append:/home/smartfield/app/logs/app.log
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONIOENCODING=utf-8
+Environment=PYTHONUTF8=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,49 +1,83 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════
-# Smart Field — Upload code to VPS
-# شغّله من جهازك (Windows Git Bash)
+# Smart Field — Deploy to Hetzner VPS
+# Ubuntu 26.04 | Python 3.14 | nginx | systemd
 #
-# الاستخدام: bash deploy/upload.sh root@YOUR_VPS_IP
-# مثال:     bash deploy/upload.sh root@5.75.180.200
+# الاستخدام: bash deploy/upload.sh [user@IP]
+# الافتراضي: root@178.105.185.3
 # ═══════════════════════════════════════════════════════════
 
 set -euo pipefail
 
-SERVER="${1:-}"
-APP_DIR="/opt/smartfield"
+SERVER="${1:-root@178.105.185.3}"
+APP_DIR="/home/smartfield/app"
+APP_USER="smartfield"
+VENV="$APP_DIR/.venv"
+SERVICE="smartfield"
 
-if [ -z "$SERVER" ]; then
-  echo "Usage: bash deploy/upload.sh root@YOUR_SERVER_IP"
-  exit 1
-fi
+echo "════════════════════════════════════════"
+echo " Smart Field — Deploy"
+echo " Server : $SERVER"
+echo " App dir: $APP_DIR"
+echo "════════════════════════════════════════"
 
-echo "Uploading Smart Field to $SERVER ..."
-
-# Sync all code (exclude unnecessary files)
-rsync -avz --progress \
+# ── 1. Sync code ──────────────────────────────────────────────
+echo ""
+echo "[1/4] Syncing code..."
+rsync -az --progress \
   --exclude='.git' \
   --exclude='__pycache__' \
   --exclude='*.pyc' \
-  --exclude='.env' \
-  --exclude='data/proposals/*' \
   --exclude='*.db' \
-  --exclude='deploy/upload.sh' \
+  --exclude='.env' \
+  --exclude='server.log' \
+  --exclude='data/proposals/*' \
+  --exclude='dashboard_test.html' \
   . "$SERVER:$APP_DIR/"
 
-# Upload .env separately (sensitive)
-echo "Uploading .env ..."
+# ── 2. Upload .env ────────────────────────────────────────────
+echo ""
+echo "[2/4] Uploading .env ..."
 scp .env "$SERVER:$APP_DIR/.env"
-ssh "$SERVER" "chmod 600 $APP_DIR/.env && chown smartfield:smartfield $APP_DIR/.env"
+ssh "$SERVER" "chmod 600 $APP_DIR/.env && chown $APP_USER:$APP_USER $APP_DIR/.env"
 
-# Install Python dependencies on server
-echo "Installing dependencies on server..."
+# ── 3. Install dependencies ───────────────────────────────────
+echo ""
+echo "[3/4] Installing Python dependencies..."
 ssh "$SERVER" "
-  cd $APP_DIR && \
-  $APP_DIR/.venv/bin/pip install -r requirements.txt -q && \
-  chown -R smartfield:smartfield $APP_DIR
+  set -e
+  # Create venv with Python 3.14 if it doesn't exist
+  if [ ! -f '$VENV/bin/python' ]; then
+    echo 'Creating virtualenv...'
+    python3.14 -m venv $VENV
+  fi
+  $VENV/bin/pip install --upgrade pip -q
+  $VENV/bin/pip install -r $APP_DIR/requirements.txt -q
+  chown -R $APP_USER:$APP_USER $APP_DIR
+  echo 'Dependencies installed.'
+"
+
+# ── 4. Restart service ────────────────────────────────────────
+echo ""
+echo "[4/4] Restarting smartfield service..."
+ssh "$SERVER" "
+  systemctl daemon-reload
+  systemctl restart $SERVICE
+  sleep 3
+  systemctl is-active $SERVICE && echo 'Service: RUNNING' || echo 'Service: FAILED'
 "
 
 echo ""
-echo "Upload complete!"
-echo "To start the service: ssh $SERVER 'systemctl restart smartfield'"
-echo "To check logs:        ssh $SERVER 'journalctl -u smartfield -f'"
+echo "════════════════════════════════════════"
+echo " Deploy complete!"
+echo ""
+echo " Health check:"
+curl -sf "https://agent.smartfield.sa/health" 2>/dev/null \
+  && echo " https://agent.smartfield.sa/health — OK" \
+  || echo " (domain may need a moment to propagate)"
+echo ""
+echo " Commands:"
+echo "   Logs:    ssh $SERVER 'journalctl -u $SERVICE -f'"
+echo "   Status:  ssh $SERVER 'systemctl status $SERVICE'"
+echo "   Dashboard: https://agent.smartfield.sa/dashboard"
+echo "════════════════════════════════════════"
