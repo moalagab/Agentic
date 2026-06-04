@@ -30,6 +30,7 @@ from employee.report_generator import (
     build_new_lead_alert,
 )
 from models.lead import LeadCreate, LeadSource
+from processors.cpq_engine import CPQEngine
 
 # ─── Conversation stage definitions ──────────────────────────────────────────
 STAGE_NEW = "new"
@@ -187,6 +188,7 @@ class AutonomousEmployee:
         self.notifier = notifier
         self.telegram = telegram
         self.client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
+        self.cpq = CPQEngine()
         self._owner_phones: set[str] = set(
             p.strip() for p in (config.SALES_TEAM_WHATSAPP or [])
         )
@@ -471,33 +473,107 @@ class AutonomousEmployee:
             },
         }
 
+        quote_tool = {
+            "name": "calculate_quote",
+            "description": (
+                "احسب عرض سعر فوري للعميل. استخدمها فور أن يطلب العميل سعراً أو عرضاً، "
+                "أو عندما تجمع: المسار + نوع البضاعة."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "route_from": {"type": "string", "description": "مدينة الإرسال"},
+                    "route_to": {"type": "string", "description": "مدينة الاستلام"},
+                    "vehicle_type": {
+                        "type": "string",
+                        "enum": ["small_van", "medium_truck", "large_truck", "reefer_trailer"],
+                        "description": "small_van=فان / medium_truck=شاحنة متوسطة / large_truck=شاحنة كبيرة / reefer_trailer=مقطورة",
+                    },
+                    "temperature_zone": {
+                        "type": "string",
+                        "enum": ["chilled", "frozen", "pharma"],
+                        "description": "chilled=مبرد +2/+8 / frozen=مجمد -18/-25 / pharma=صيدلاني",
+                    },
+                    "frequency_per_month": {
+                        "type": "integer",
+                        "description": "عدد الرحلات في الشهر (افتراضي 1)",
+                    },
+                },
+                "required": ["route_from", "route_to"],
+            },
+        }
+
         messages = [*history[:-1], {"role": "user", "content": message}]
+
+        system_blocks = [
+            {
+                "type": "text",
+                "text": EMPLOYEE_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            },
+            {
+                "type": "text",
+                "text": ctx,
+            },
+        ]
 
         response = await self.client.messages.create(
             model=CLAUDE_CONV_MODEL,
-            max_tokens=220,
-            system=[
-                {
-                    "type": "text",
-                    "text": EMPLOYEE_SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": ctx,
-                },
-            ],
-            tools=[extract_tool],
+            max_tokens=300,
+            system=system_blocks,
+            tools=[extract_tool, quote_tool],
             messages=messages,
         )
 
-        # Fire CRM registration in background — never block the reply
+        # Handle tool calls
+        quote_result: str | None = None
         if response.stop_reason == "tool_use":
+            tool_results = []
             for block in response.content:
-                if block.type == "tool_use" and block.name == "register_lead":
+                if block.type != "tool_use":
+                    continue
+                if block.name == "register_lead":
                     asyncio.create_task(
                         self._register_lead_from_chat(phone, block.input, profile)
                     )
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "تم تسجيل العميل.",
+                    })
+                elif block.name == "calculate_quote":
+                    try:
+                        q = self.cpq.calculate(
+                            route_from=block.input.get("route_from", ""),
+                            route_to=block.input.get("route_to", ""),
+                            vehicle_type=block.input.get("vehicle_type", "medium_truck"),
+                            temperature_zone=block.input.get("temperature_zone", "chilled"),
+                            frequency_per_month=int(block.input.get("frequency_per_month", 1)),
+                        )
+                        quote_result = q.quote_summary_ar
+                    except Exception as exc:
+                        logger.error("cpq.calculation_failed", error=str(exc))
+                        quote_result = "لم أتمكن من حساب السعر الآن."
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": quote_result or "",
+                    })
+
+            # Second call so Claude formats the quote naturally
+            if tool_results:
+                follow_up_messages = [
+                    *messages,
+                    {"role": "assistant", "content": response.content},
+                    {"role": "user", "content": tool_results},
+                ]
+                response = await self.client.messages.create(
+                    model=CLAUDE_CONV_MODEL,
+                    max_tokens=350,
+                    system=system_blocks,
+                    tools=[extract_tool, quote_tool],
+                    messages=follow_up_messages,
+                )
 
         text_response = self._extract_text(response)
 
