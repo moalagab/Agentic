@@ -159,7 +159,7 @@ class HubSpotCRM(BaseCRM):
         """
         Create a HubSpot contact from a Lead.
         Returns the HubSpot contact ID.
-        Handles 409 Conflict (duplicate) gracefully by returning existing ID.
+        Handles 409 Conflict (duplicate) and 400 (missing custom properties) gracefully.
         """
         properties = _lead_to_hubspot_properties(lead)
 
@@ -169,15 +169,27 @@ class HubSpotCRM(BaseCRM):
                 json={"properties": properties},
             )
 
+            # Retry with only guaranteed standard HubSpot properties
+            if resp.status_code == 400 and "PROPERTY_DOESNT_EXIST" in resp.text:
+                self._log.warning(
+                    "HubSpot custom properties missing — retrying with standard fields only",
+                    body=resp.text[:200],
+                )
+                standard_props = {k: v for k, v in properties.items()
+                                  if k in ("firstname", "lastname", "company",
+                                           "phone", "email", "lifecyclestage",
+                                           "hs_lead_status")}
+                resp = await client.post(
+                    CONTACTS_ENDPOINT,
+                    json={"properties": standard_props},
+                )
+
             if resp.status_code == 409:
                 # Duplicate: extract existing ID from error
                 self._log.info("Duplicate contact in HubSpot, fetching existing ID")
-                existing_id = resp.json().get("error", {})
-                # HubSpot 409 returns {"status":"error","message":"Contact already exists","identityProfile":{"vid":...}}
                 vid = resp.json().get("identityProfile", {}).get("vid") or resp.json().get("error", "")
                 if vid:
                     return str(vid)
-                # Fall back to searching by email
                 if lead.email:
                     existing = await self.search_lead(email=lead.email)
                     if existing and existing.crm_id:

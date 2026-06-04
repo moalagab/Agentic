@@ -347,7 +347,7 @@ def create_pipeline_from_config(config: "Settings") -> LeadPipeline:
         fallback_crm = None
 
     # ── Create notifier (Telegram takes priority over WhatsApp) ──────────────
-    if config.is_telegram_configured():
+    if config.has_telegram_owners():
         notifier = TelegramNotifier(config)
     else:
         notifier = WhatsAppNotifier(config)

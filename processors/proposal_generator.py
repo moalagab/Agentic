@@ -97,7 +97,10 @@ async def generate_proposal_text(lead: dict, anthropic_key: str, revision_notes:
             system="أنت كاتب عروض احترافي لشركة سمارت فيلد للنقل المبرد في السعودية. اكتب بالعربية فقط.",
             messages=[{"role": "user", "content": _build_proposal_prompt(lead, revision_notes)}],
         )
-        return message.content[0].text
+        blocks = [b for b in message.content if hasattr(b, "text")]
+        if not blocks:
+            raise ValueError("Empty response from Claude")
+        return blocks[0].text
 
     except Exception as exc:
         logger.error("Proposal generation failed", error=str(exc))

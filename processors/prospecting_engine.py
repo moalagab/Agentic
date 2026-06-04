@@ -26,6 +26,8 @@ from typing import Any
 
 import structlog
 
+from agent.cold_outreach import build_outreach_for_prospect
+
 logger = structlog.get_logger(__name__)
 
 # ─── Segments (13 segments × 8 prospects = 104/day) ──────────────────────────
@@ -268,8 +270,6 @@ class ProspectingEngine:
                     ok = await self._submit_prospect(p, segment)
                     if ok:
                         results["added_to_crm"] += 1
-                        # Enrich for briefing (keep top-scored ones)
-                        from agent.cold_outreach import build_outreach_for_prospect
                         results["top_prospects"].append({
                             **p,
                             "segment_ar": segment["name_ar"],
@@ -299,7 +299,12 @@ class ProspectingEngine:
             messages=[{"role": "user", "content": prompt}],
         )
 
-        text = message.content[0].text.strip()
+        # Extract text safely — Anthropic response may have no content blocks
+        blocks = [b for b in message.content if hasattr(b, "text")]
+        if not blocks:
+            self._log.warning("Empty response from Claude", segment=segment["id"])
+            return []
+        text = blocks[0].text.strip()
 
         # Extract JSON array
         match = re.search(r'\[[\s\S]+\]', text)
@@ -315,7 +320,6 @@ class ProspectingEngine:
 
     async def _submit_prospect(self, prospect: dict, segment: dict) -> bool:
         """Submit a discovered prospect to the lead pipeline with a ready outreach message."""
-        from agent.cold_outreach import build_outreach_for_prospect
         from models.lead import LeadCreate, LeadSource
 
         try:

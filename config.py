@@ -175,6 +175,11 @@ class Settings(BaseSettings):
         return bool(self.WHATSAPP_BUSINESS_TOKEN and self.WHATSAPP_PHONE_ID)
 
     def is_telegram_configured(self) -> bool:
+        """True if bot token exists — enough to receive and respond to messages."""
+        return bool(self.TELEGRAM_BOT_TOKEN)
+
+    def has_telegram_owners(self) -> bool:
+        """True if owner chat IDs are set — needed to push proactive notifications."""
         return bool(self.TELEGRAM_BOT_TOKEN and self.TELEGRAM_OWNER_CHAT_IDS)
 
 
