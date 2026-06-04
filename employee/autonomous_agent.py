@@ -48,8 +48,8 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-CLAUDE_MODEL = "claude-sonnet-4-6"          # used for owner commands & complex tasks
-CLAUDE_CONV_MODEL = "claude-haiku-4-5-20251001"  # used for lead conversations (fast)
+CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_CONV_MODEL = "claude-sonnet-4-6"
 
 # ─── Employee system prompt ───────────────────────────────────────────────────
 

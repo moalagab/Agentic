@@ -72,7 +72,7 @@ class ContentEngine:
 
         client = anthropic.AsyncAnthropic(api_key=self.api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=600,
             system=CONTENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -190,7 +190,7 @@ BODY:
 
         client = anthropic.AsyncAnthropic(api_key=self.api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=400,
             system=CONTENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -234,7 +234,7 @@ BODY:
 
         client = anthropic.AsyncAnthropic(api_key=self.api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=150,
             system=CONTENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
@@ -263,7 +263,7 @@ QUESTION: [السؤال الختامي]"""
 
         client = anthropic.AsyncAnthropic(api_key=self.api_key)
         response = await client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model="claude-sonnet-4-6",
             max_tokens=300,
             system=CONTENT_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
