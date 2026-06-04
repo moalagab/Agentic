@@ -357,6 +357,26 @@ class ProspectingEngine:
                 },
             )
             await self.pipeline.process(lead_create)
+
+            # Also save to outbound_leads table (separate from inbound leads)
+            crm = getattr(self.pipeline, "primary_crm", None)
+            if crm and hasattr(crm, "add_outbound_lead"):
+                await crm.add_outbound_lead({
+                    "company_name": prospect.get("company", ""),
+                    "industry": segment["name_ar"],
+                    "city": prospect.get("city", ""),
+                    "score": int(prospect.get("score", segment["score_base"])),
+                    "source": "morning_prospecting",
+                    "outreach_message": outreach_msg,
+                    "raw_data": {
+                        "segment_id": segment["id"],
+                        "fleet_est": int(prospect.get("fleet_est") or 1),
+                        "cold_need": prospect.get("cold_need", ""),
+                        "outreach_strategy": prospect.get("outreach", ""),
+                        "generated_at": datetime.utcnow().isoformat(),
+                    },
+                })
+
             self._log.info("Prospect submitted", company=lead_create.company, city=prospect.get("city"))
             return True
 

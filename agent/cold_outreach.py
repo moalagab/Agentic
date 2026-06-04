@@ -2,6 +2,7 @@
 Smart Field — Cold Outreach Assembler
 يبني رسالة الـ outreach من ملف smartfield_cold_outreach.json
 حسب اسم العميل ونشاطه.
+Claude يولّد رسائل مخصصة حسب الصناعة + المدينة + حجم الشركة.
 """
 
 from __future__ import annotations
@@ -100,6 +101,70 @@ def build_outreach_for_prospect(prospect: dict, segment_id: str) -> str:
     """
     company_name = prospect.get("company", "")
     return build_outreach(company_name, segment_id)
+
+
+async def generate_claude_message(
+    prospect: dict,
+    segment_id: str,
+    anthropic_api_key: str,
+) -> str:
+    """
+    Claude يكتب رسالة واتساب مخصصة حسب:
+    - الصناعة (segment)
+    - المدينة (city)
+    - حجم الشركة (fleet_est / budget_sar)
+
+    Returns a ready-to-send Arabic WhatsApp message (under 250 chars).
+    """
+    import anthropic
+
+    company   = prospect.get("company", "الشركة")
+    city      = prospect.get("city", "المملكة")
+    activity  = prospect.get("activity", segment_id)
+    cold_need = prospect.get("cold_need", "")
+    fleet     = prospect.get("fleet_est", 1)
+    budget    = prospect.get("budget_sar", 0)
+
+    # Determine company size label
+    if isinstance(fleet, int):
+        if fleet >= 15:
+            size_label = "كبيرة (أسطول ضخم)"
+        elif fleet >= 5:
+            size_label = "متوسطة"
+        else:
+            size_label = "صغيرة أو ناشئة"
+    else:
+        size_label = "متوسطة"
+
+    prompt = f"""\
+اكتب رسالة واتساب قصيرة ومقنعة لعميل محتمل في قطاع النقل المبرد.
+لا تتجاوز 220 حرفاً. بالعربي فقط. لا إيموجي.
+
+بيانات الشركة:
+- الاسم: {company}
+- المدينة: {city}
+- النشاط: {activity}
+- احتياج التبريد: {cold_need}
+- حجم الشركة: {size_label}
+- الميزانية التقريبية: {int(budget):,} ريال/شهر
+
+سمارت فيلد = شركة نقل مبرد سعودية. أسطول Thermo King. تغطية المملكة. تتبع GPS. معتمدة ISO 22000.
+
+الرسالة يجب أن:
+1. تبدأ بتحية قصيرة موجهة لاسم الشركة
+2. تُلمّح لمشكلة حقيقية تواجهها بناءً على نشاطها وحجمها ومدينتها
+3. تعرض حلاً واحداً محدداً من سمارت فيلد
+4. تنتهي بسؤال مفتوح أو دعوة للتواصل
+أعطِ الرسالة فقط بدون أي شرح."""
+
+    client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
+    response = await client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    blocks = [b for b in response.content if hasattr(b, "text")]
+    return blocks[0].text.strip() if blocks else build_outreach_for_prospect(prospect, segment_id)
 
 
 # ─── CLI / Example ────────────────────────────────────────────────────────────

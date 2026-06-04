@@ -54,6 +54,7 @@ from processors.cpq_engine import CPQEngine
 from processors.content_engine import ContentEngine
 from processors.customer_success import CustomerSuccessEngine
 from processors.learning_loop import LearningLoop
+from processors.outbound_sender import OutboundSender
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 
 logger = structlog.get_logger(__name__)
@@ -76,6 +77,7 @@ _cpq_engine: Optional[CPQEngine] = None
 _content_engine: Optional[ContentEngine] = None
 _cs_engine: Optional[CustomerSuccessEngine] = None
 _learning_loop: Optional[LearningLoop] = None
+_outbound_sender: Optional[OutboundSender] = None
 
 # Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
 _processed_wa_ids: OrderedDict[str, None] = OrderedDict()
@@ -89,7 +91,7 @@ _LEAD_CACHE_TTL_H = 24
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop, _outbound_sender
 
     settings = get_settings()
 
@@ -170,7 +172,12 @@ async def lifespan(app: FastAPI):
                 anthropic_api_key=settings.ANTHROPIC_API_KEY,
                 notifier=_pipeline.notifier,
             )
-            log.info("Customer Success + Learning Loop initialized")
+            _outbound_sender = OutboundSender(
+                crm=_pipeline.primary_crm,
+                notifier=_pipeline.notifier,
+                anthropic_api_key=settings.ANTHROPIC_API_KEY,
+            )
+            log.info("Customer Success + Learning Loop + Outbound Sender initialized")
         except Exception as exc:
             log.warning("RevOS v6 engines init partial", error=str(exc))
 
@@ -182,6 +189,7 @@ async def lifespan(app: FastAPI):
         cs_engine=_cs_engine,
         learning_loop=_learning_loop,
         content_engine=_content_engine,
+        outbound_sender=_outbound_sender,
     )
     _scheduler.start()
 

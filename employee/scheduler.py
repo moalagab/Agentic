@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from processors.customer_success import CustomerSuccessEngine
     from processors.learning_loop import LearningLoop
     from processors.content_engine import ContentEngine
+    from processors.outbound_sender import OutboundSender
 
 logger = structlog.get_logger(__name__)
 
@@ -49,6 +50,7 @@ class SmartfieldScheduler:
         cs_engine: "Optional[CustomerSuccessEngine]" = None,
         learning_loop: "Optional[LearningLoop]" = None,
         content_engine: "Optional[ContentEngine]" = None,
+        outbound_sender: "Optional[OutboundSender]" = None,
     ):
         self.employee = employee
         self.pipeline = pipeline
@@ -56,6 +58,7 @@ class SmartfieldScheduler:
         self.cs_engine = cs_engine
         self.learning_loop = learning_loop
         self.content_engine = content_engine
+        self.outbound_sender = outbound_sender
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -163,7 +166,17 @@ class SmartfieldScheduler:
             misfire_grace_time=600,
         )
 
-        logger.info("scheduler.jobs_registered", count=9)
+        # Outbound sending — every day at 9:30 AM (after morning prospecting)
+        self.scheduler.add_job(
+            self._run_outbound_sender,
+            CronTrigger(hour=9, minute=30, timezone=RIYADH_TZ),
+            id="outbound_sender",
+            name="إرسال رسائل الـ Outreach",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        logger.info("scheduler.jobs_registered", count=10)
 
     async def _run_morning_prospecting(self):
         logger.info("scheduler.running_morning_prospecting")
@@ -295,6 +308,38 @@ class SmartfieldScheduler:
             )
         except Exception as exc:
             logger.error("scheduler.learning_loop_error", error=str(exc))
+
+    async def _run_outbound_sender(self):
+        """Send personalized outreach to outbound_leads with phone numbers."""
+        logger.info("scheduler.running_outbound_sender")
+        if not self.outbound_sender:
+            logger.debug("scheduler.outbound_sender_skipped", reason="outbound_sender not set")
+            return
+        try:
+            results = await self.outbound_sender.send_pending_outreach()
+            logger.info(
+                "scheduler.outbound_sender_complete",
+                sent=results.get("sent", 0),
+                skipped=results.get("skipped_no_phone", 0),
+                failed=results.get("failed", 0),
+            )
+            # Notify owner with summary
+            if results.get("sent", 0) > 0:
+                summary = (
+                    f"*Outreach اليومي*\n"
+                    f"━━━━━━━━━━━━━\n"
+                    f"✅ أُرسل: {results['sent']}\n"
+                    f"⏭ بدون رقم: {results['skipped_no_phone']}\n"
+                    f"❌ فشل: {results['failed']}"
+                )
+                if self.employee.telegram and self.employee._owner_telegram_ids:
+                    for chat_id in self.employee._owner_telegram_ids:
+                        await self.employee.telegram.send_message(chat_id, summary)
+                else:
+                    for phone in self.employee._owner_phones:
+                        await self.employee._send_whatsapp(phone, summary)
+        except Exception as exc:
+            logger.error("scheduler.outbound_sender_error", error=str(exc))
 
     async def _run_content_plan(self):
         """Generate weekly content plan and send to owner (Layer 7)."""
