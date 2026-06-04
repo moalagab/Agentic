@@ -25,6 +25,9 @@ if TYPE_CHECKING:
     from employee.autonomous_agent import AutonomousEmployee
     from processors.pipeline import LeadPipeline
     from processors.sla_monitor import SLAMonitor
+    from processors.customer_success import CustomerSuccessEngine
+    from processors.learning_loop import LearningLoop
+    from processors.content_engine import ContentEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -43,10 +46,16 @@ class SmartfieldScheduler:
         employee: "AutonomousEmployee",
         pipeline: "Optional[LeadPipeline]" = None,
         sla_monitor: "Optional[SLAMonitor]" = None,
+        cs_engine: "Optional[CustomerSuccessEngine]" = None,
+        learning_loop: "Optional[LearningLoop]" = None,
+        content_engine: "Optional[ContentEngine]" = None,
     ):
         self.employee = employee
         self.pipeline = pipeline
         self.sla_monitor = sla_monitor
+        self.cs_engine = cs_engine
+        self.learning_loop = learning_loop
+        self.content_engine = content_engine
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -124,7 +133,37 @@ class SmartfieldScheduler:
             misfire_grace_time=300,
         )
 
-        logger.info("scheduler.jobs_registered", count=6)
+        # Customer Success daily check - every day at 10:00 AM
+        self.scheduler.add_job(
+            self._run_cs_check,
+            CronTrigger(hour=10, minute=0, timezone=RIYADH_TZ),
+            id="cs_daily_check",
+            name="فحص نجاح العملاء اليومي",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+
+        # Learning Loop weekly analysis - every Sunday at 8:00 AM
+        self.scheduler.add_job(
+            self._run_learning_loop,
+            CronTrigger(day_of_week="sun", hour=8, minute=0, timezone=RIYADH_TZ),
+            id="learning_loop",
+            name="تحليل Win/Loss الأسبوعي",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        # Weekly content plan - every Saturday at 7:00 PM
+        self.scheduler.add_job(
+            self._run_content_plan,
+            CronTrigger(day_of_week="sat", hour=19, minute=0, timezone=RIYADH_TZ),
+            id="weekly_content",
+            name="خطة المحتوى الأسبوعية",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        logger.info("scheduler.jobs_registered", count=9)
 
     async def _run_morning_prospecting(self):
         logger.info("scheduler.running_morning_prospecting")
@@ -211,7 +250,7 @@ class SmartfieldScheduler:
                 return
 
             summary = (
-                f"🌙 *ملخص آخر اليوم - سمارت فيلد*\n"
+                f"*ملخص آخر اليوم - سمارت فيلد*\n"
                 f"━━━━━━━━━━━━━\n"
                 f"إجمالي الأنشطة اليوم: {len(actions)}\n"
                 + "\n".join(f"  • {a['description']}" for a in actions[:5])
@@ -221,3 +260,76 @@ class SmartfieldScheduler:
                 await self.employee._send_whatsapp(phone, summary)
         except Exception as exc:
             logger.error("scheduler.eod_summary_error", error=str(exc))
+
+    async def _run_cs_check(self):
+        """Run Customer Success daily check (Layer 8)."""
+        logger.info("scheduler.running_cs_check")
+        if not self.cs_engine:
+            logger.debug("scheduler.cs_check_skipped", reason="cs_engine not set")
+            return
+        try:
+            results = await self.cs_engine.run_daily_check()
+            logger.info(
+                "scheduler.cs_check_complete",
+                renewals=results.get("renewals_alerted", 0),
+                upsells=results.get("upsells_identified", 0),
+                churn_risks=results.get("churn_risks", 0),
+                referrals=results.get("referrals_requested", 0),
+            )
+        except Exception as exc:
+            logger.error("scheduler.cs_check_error", error=str(exc))
+
+    async def _run_learning_loop(self):
+        """Run weekly Win/Loss learning analysis (Layer 10)."""
+        logger.info("scheduler.running_learning_loop")
+        if not self.learning_loop:
+            logger.debug("scheduler.learning_loop_skipped", reason="learning_loop not set")
+            return
+        try:
+            report = await self.learning_loop.run_weekly_analysis()
+            logger.info(
+                "scheduler.learning_loop_complete",
+                win_rate=report.get("win_loss", {}).get("win_rate_pct", 0),
+                won=report.get("win_loss", {}).get("won_count", 0),
+                lost=report.get("win_loss", {}).get("lost_count", 0),
+            )
+        except Exception as exc:
+            logger.error("scheduler.learning_loop_error", error=str(exc))
+
+    async def _run_content_plan(self):
+        """Generate weekly content plan and send to owner (Layer 7)."""
+        logger.info("scheduler.running_content_plan")
+        if not self.content_engine:
+            logger.debug("scheduler.content_plan_skipped", reason="content_engine not set")
+            return
+        try:
+            # Get pipeline stats for context
+            pipeline_data = {}
+            if self.pipeline:
+                try:
+                    pipeline_data = await self.pipeline.primary_crm.get_pipeline_stats()
+                except Exception:
+                    pass
+
+            plan = await self.content_engine.generate_weekly_content_plan(pipeline_data=pipeline_data)
+
+            # Format and send
+            lines = ["*خطة المحتوى الأسبوعية — LinkedIn*", "━━━━━━━━━━━━━━"]
+            for item in plan:
+                lines.append(f"\n*{item['day']}* — {item['content_type']}")
+                lines.append(f"الهدف: {item['revenue_goal']}")
+                preview = item["post"][:120].replace("\n", " ")
+                lines.append(f"_{preview}..._")
+
+            msg = "\n".join(lines)
+
+            if self.employee.telegram and self.employee._owner_telegram_ids:
+                for chat_id in self.employee._owner_telegram_ids:
+                    await self.employee.telegram.send_message(chat_id, msg)
+            else:
+                for phone in self.employee._owner_phones:
+                    await self.employee._send_whatsapp(phone, msg)
+
+            logger.info("scheduler.content_plan_sent", posts=len(plan))
+        except Exception as exc:
+            logger.error("scheduler.content_plan_error", error=str(exc))

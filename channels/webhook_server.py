@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import OrderedDict
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import structlog
@@ -49,6 +50,10 @@ from processors.followup_engine import FollowUpEngine
 from processors.proposal_generator import create_and_save_proposal, generate_proposal_text
 from processors.meeting_booking import MeetingBookingManager
 from processors.sla_monitor import SLAMonitor
+from processors.cpq_engine import CPQEngine
+from processors.content_engine import ContentEngine
+from processors.customer_success import CustomerSuccessEngine
+from processors.learning_loop import LearningLoop
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 
 logger = structlog.get_logger(__name__)
@@ -67,20 +72,24 @@ _scheduler: Optional[SmartfieldScheduler] = None
 _followup_engine: Optional[FollowUpEngine] = None
 _booking_manager: Optional[MeetingBookingManager] = None
 _sla_monitor: Optional[SLAMonitor] = None
+_cpq_engine: Optional[CPQEngine] = None
+_content_engine: Optional[ContentEngine] = None
+_cs_engine: Optional[CustomerSuccessEngine] = None
+_learning_loop: Optional[LearningLoop] = None
 
-# Deduplication: track recently processed WhatsApp message IDs (WAHA sends message + message.any)
-_processed_wa_ids: set[str] = set()
-_processed_wa_ids_order: list[str] = []  # maintain insertion order for eviction
-_WA_DEDUP_MAX = 500  # max IDs to keep in memory
+# Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
+_processed_wa_ids: OrderedDict[str, None] = OrderedDict()
+_WA_DEDUP_MAX = 500
 
-# In-memory store for lead lookups by internal ID (replace with DB in production)
-_processed_leads: dict[str, ProcessedLead] = {}
+# In-memory lead cache with timestamps for TTL eviction (24h)
+_processed_leads: dict[str, tuple[ProcessedLead, datetime]] = {}
+_LEAD_CACHE_TTL_H = 24
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop
 
     settings = get_settings()
 
@@ -133,8 +142,8 @@ async def lifespan(app: FastAPI):
     _sla_monitor = SLAMonitor(notifier=_pipeline.notifier, supabase_client=_supabase_client)
     log.info("SLA monitor initialized")
 
-    # Initialize Proposal Approval Manager
-    if settings.is_telegram_configured() and _tg_handler:
+    # Initialize Proposal Approval Manager (needs owner chat IDs to send approvals)
+    if settings.has_telegram_owners() and _tg_handler:
         from processors.proposal_generator import ProposalApprovalManager
         _proposal_manager = ProposalApprovalManager(
             anthropic_key=settings.ANTHROPIC_API_KEY,
@@ -144,8 +153,36 @@ async def lifespan(app: FastAPI):
         )
         log.info("Proposal approval manager initialized")
 
+    # Initialize RevOS v6 engines
+    _cpq_engine = CPQEngine()
+    log.info("CPQ engine initialized")
+
+    _content_engine = ContentEngine(anthropic_api_key=settings.ANTHROPIC_API_KEY)
+    log.info("Content engine initialized")
+
+    if settings.is_supabase_configured():
+        try:
+            from supabase import create_client as _create_sb
+            _sb = _create_sb(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            _cs_engine = CustomerSuccessEngine(supabase_client=_sb, notifier=_pipeline.notifier)
+            _learning_loop = LearningLoop(
+                supabase_client=_sb,
+                anthropic_api_key=settings.ANTHROPIC_API_KEY,
+                notifier=_pipeline.notifier,
+            )
+            log.info("Customer Success + Learning Loop initialized")
+        except Exception as exc:
+            log.warning("RevOS v6 engines init partial", error=str(exc))
+
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
-    _scheduler = SmartfieldScheduler(_employee, pipeline=_pipeline, sla_monitor=_sla_monitor)
+    _scheduler = SmartfieldScheduler(
+        _employee,
+        pipeline=_pipeline,
+        sla_monitor=_sla_monitor,
+        cs_engine=_cs_engine,
+        learning_loop=_learning_loop,
+        content_engine=_content_engine,
+    )
     _scheduler.start()
 
     log.info(
@@ -247,7 +284,13 @@ def _processed_to_response(processed: ProcessedLead) -> LeadResponse:
 async def _run_pipeline(lead_create: LeadCreate, pipeline: LeadPipeline) -> ProcessedLead:
     """Execute pipeline and store result for later retrieval."""
     processed = await pipeline.process(lead_create)
-    _processed_leads[processed.lead.id] = processed
+    # Store with timestamp for TTL eviction; clean stale entries while here
+    now = datetime.utcnow()
+    cutoff = now - timedelta(hours=_LEAD_CACHE_TTL_H)
+    stale = [k for k, (_, ts) in _processed_leads.items() if ts < cutoff]
+    for k in stale:
+        del _processed_leads[k]
+    _processed_leads[str(processed.lead.id)] = (processed, now)
 
     # Register with SLA monitor so response time is tracked
     if _sla_monitor:
@@ -329,7 +372,7 @@ async def get_lead_status(lead_id: str) -> dict:
     if lead_id not in _processed_leads:
         raise HTTPException(status_code=404, detail="Lead not found")
 
-    processed = _processed_leads[lead_id]
+    processed, _ = _processed_leads[lead_id]
     return _processed_to_response(processed).model_dump()
 
 
@@ -498,6 +541,165 @@ class FollowUpRequest(BaseModel):
     priority: str = "medium"
 
 
+# ── CPQ Engine Endpoints (Layer 6) ────────────────────────────────────────────
+
+class CPQRequest(BaseModel):
+    route_from: str = Field(..., description="Origin city")
+    route_to: str = Field(..., description="Destination city")
+    vehicle_type: str = Field(default="medium_truck", description="small_van/medium_truck/large_truck/reefer_trailer")
+    temperature_zone: str = Field(default="chilled", description="chilled/frozen/pharma")
+    frequency_per_month: int = Field(default=1, ge=1, description="Trips per month")
+    urgency: str = Field(default="normal", description="normal/express/urgent")
+    distance_km: Optional[int] = Field(None, description="Override distance in km")
+    weight_kg: Optional[float] = Field(None, description="Cargo weight in kg")
+    volume_m3: Optional[float] = Field(None, description="Cargo volume in m3")
+
+
+@app.post("/api/cpq/quote", tags=["CPQ"])
+async def generate_cpq_quote(req: CPQRequest) -> dict:
+    """
+    Generate an instant CPQ quote for a transport request.
+    توليد عرض سعر فوري ودقيق.
+    """
+    if not _cpq_engine:
+        raise HTTPException(status_code=503, detail="CPQ engine not initialized")
+    try:
+        quote = _cpq_engine.calculate(
+            route_from=req.route_from,
+            route_to=req.route_to,
+            vehicle_type=req.vehicle_type,
+            temperature_zone=req.temperature_zone,
+            frequency_per_month=req.frequency_per_month,
+            urgency=req.urgency,
+            distance_km=req.distance_km,
+            weight_kg=req.weight_kg,
+            volume_m3=req.volume_m3,
+        )
+        return {"success": True, "quote": _cpq_engine.to_dict(quote)}
+    except Exception as exc:
+        logger.error("CPQ quote failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/cpq/vehicles", tags=["CPQ"])
+async def list_vehicles() -> dict:
+    """List available vehicle types and their specs."""
+    from processors.cpq_engine import VEHICLE_CONFIG, TEMP_PREMIUMS
+    return {"vehicles": VEHICLE_CONFIG, "temperature_zones": TEMP_PREMIUMS}
+
+
+# ── Content Engine Endpoints (Layer 7) ────────────────────────────────────────
+
+class ContentRequest(BaseModel):
+    content_type: str = Field(default="insight", description="insight/win/objection/stats/cold_chain")
+    data: Optional[dict] = None
+
+
+@app.post("/api/content/generate", tags=["Content"])
+async def generate_content(req: ContentRequest) -> dict:
+    """
+    Generate marketing content mapped to revenue impact.
+    توليد محتوى تسويقي مرتبط بأهداف الإيراد.
+    """
+    if not _content_engine:
+        raise HTTPException(status_code=503, detail="Content engine not initialized")
+    try:
+        post = await _content_engine.generate_linkedin_post(
+            content_type=req.content_type, data=req.data
+        )
+        return {
+            "success": True,
+            "content_type": req.content_type,
+            "post": post,
+            "platform": "linkedin",
+            "generated_at": datetime.utcnow().isoformat(),
+        }
+    except Exception as exc:
+        logger.error("Content generation failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/content/weekly-plan", tags=["Content"])
+async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipeline)) -> dict:
+    """Generate a full 5-post weekly LinkedIn content calendar."""
+    if not _content_engine:
+        raise HTTPException(status_code=503, detail="Content engine not initialized")
+    try:
+        stats = await pipeline.primary_crm.get_pipeline_stats()
+        plan = await _content_engine.generate_weekly_content_plan(pipeline_data=stats)
+        return {"success": True, "week_plan": plan, "total_posts": len(plan)}
+    except Exception as exc:
+        logger.error("Weekly plan generation failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/content/objection", tags=["Content"])
+async def handle_objection(body: dict) -> dict:
+    """Generate a sales script for handling a specific objection."""
+    if not _content_engine:
+        raise HTTPException(status_code=503, detail="Content engine not initialized")
+    objection = body.get("objection", "")
+    if not objection:
+        raise HTTPException(status_code=400, detail="objection field required")
+    script = await _content_engine.generate_objection_script(objection)
+    return {"success": True, "script": script}
+
+
+# ── Customer Success Endpoints (Layer 8) ──────────────────────────────────────
+
+@app.get("/api/customer-success/opportunities", tags=["Customer Success"])
+async def get_cs_opportunities() -> dict:
+    """Get all customer success opportunities: renewals, upsells, churn risks, referrals."""
+    if not _cs_engine:
+        return {"success": False, "message": "Customer Success engine not initialized (Supabase required)"}
+    try:
+        opportunities = await _cs_engine.get_cs_opportunities()
+        return {"success": True, "opportunities": opportunities}
+    except Exception as exc:
+        logger.error("CS opportunities fetch failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/customer-success/run-check", tags=["Customer Success"])
+async def run_cs_check() -> dict:
+    """Manually trigger the customer success daily check."""
+    if not _cs_engine:
+        raise HTTPException(status_code=503, detail="Customer Success engine not initialized")
+    results = await _cs_engine.run_daily_check()
+    return {"success": True, "results": results}
+
+
+# ── Learning Loop Endpoints (Layer 10) ────────────────────────────────────────
+
+@app.post("/api/insights/run-analysis", tags=["Intelligence"])
+async def run_win_loss_analysis() -> dict:
+    """
+    Trigger a manual win/loss analysis and learning loop.
+    تشغيل تحليل Win/Loss يدوياً.
+    """
+    if not _learning_loop:
+        raise HTTPException(status_code=503, detail="Learning Loop not initialized (Supabase required)")
+    try:
+        report = await _learning_loop.run_weekly_analysis()
+        return {"success": True, "report": report}
+    except Exception as exc:
+        logger.error("Win/loss analysis failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/insights/icp", tags=["Intelligence"])
+async def get_icp_profile() -> dict:
+    """Get the current Ideal Customer Profile derived from won deals."""
+    if not _learning_loop:
+        raise HTTPException(status_code=503, detail="Learning Loop not initialized")
+    try:
+        won_deals = await _learning_loop._fetch_leads_by_status("won")
+        icp = _learning_loop._analyze_icp(won_deals)
+        return {"success": True, "icp": icp, "based_on_deals": len(won_deals)}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/followup/start", tags=["Sales"])
 async def start_followup_sequence(req: FollowUpRequest) -> dict:
     """
@@ -572,11 +774,9 @@ async def whatsapp_webhook(
             log.debug("WhatsApp duplicate message ignored", msg_id=msg_id)
             return {"status": "duplicate"}
         if msg_id:
-            _processed_wa_ids.add(msg_id)
-            _processed_wa_ids_order.append(msg_id)
-            if len(_processed_wa_ids_order) > _WA_DEDUP_MAX:
-                evict = _processed_wa_ids_order.pop(0)
-                _processed_wa_ids.discard(evict)
+            _processed_wa_ids[msg_id] = None
+            if len(_processed_wa_ids) > _WA_DEDUP_MAX:
+                _processed_wa_ids.popitem(last=False)  # evict oldest, O(1)
 
         log.info("WhatsApp message received", phone=phone, length=len(text))
         background_tasks.add_task(_handle_whatsapp_conversation, phone, text, chat_id)

@@ -24,12 +24,15 @@ class LeadSource(str, Enum):
 
 
 class LeadStatus(str, Enum):
-    """Current status of the lead in the sales pipeline."""
+    """Current status of the lead in the sales pipeline (RevOS v6 stages)."""
     NEW = "new"
     CONTACTED = "contacted"
     QUALIFIED = "qualified"
+    QUOTATION_REQUESTED = "quotation_requested"
+    QUOTATION_SENT = "quotation_sent"
+    NEGOTIATION = "negotiation"
+    WON = "won"
     UNQUALIFIED = "unqualified"
-    CONVERTED = "converted"
     LOST = "lost"
 
 
@@ -95,6 +98,22 @@ class Lead(BaseModel):
     expected_monthly_revenue: float = Field(default=0.0, ge=0, description="Estimated monthly revenue in SAR")
     expected_trips_per_month: int = Field(default=0, ge=0, description="Estimated trips per month")
     estimated_ltv: float = Field(default=0.0, ge=0, description="Estimated lifetime value in SAR (3-year)")
+
+    # CPQ fields (Layer 6)
+    quoted_price: Optional[float] = Field(None, ge=0, description="Last CPQ quote price in SAR")
+    quote_valid_until: Optional[datetime] = Field(None, description="Quote expiry date")
+    vehicle_type: Optional[str] = Field(None, description="Vehicle type for CPQ: small_van/medium_truck/large_truck/reefer_trailer")
+    temperature_zone: Optional[str] = Field(None, description="Temperature zone: chilled/frozen/pharma")
+    frequency_per_month: Optional[int] = Field(None, ge=1, description="Expected trips per month for pricing")
+
+    # Customer Success fields (Layer 8)
+    won_date: Optional[datetime] = Field(None, description="Date deal was won")
+    first_shipment_date: Optional[datetime] = Field(None, description="Date of first shipment")
+    total_shipments: int = Field(default=0, ge=0, description="Total completed shipments")
+    total_revenue_generated: float = Field(default=0.0, ge=0, description="Total revenue generated in SAR")
+    last_shipment_date: Optional[datetime] = Field(None, description="Date of most recent shipment")
+    upsell_opportunity: Optional[str] = Field(None, description="Identified upsell opportunity description")
+    referral_requested: bool = Field(default=False, description="Whether referral was requested")
 
     @field_validator("phone")
     @classmethod
