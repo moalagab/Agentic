@@ -373,6 +373,27 @@ async def run_prospecting_engine(
 
         # ── الخطوة 3: حفظ في Supabase ────────────────────────────────────────
         try:
+            # Compute ICP score + buying signals before saving
+            _icp_score, _icp_segment, _signals = 0, None, []
+            try:
+                from processors.icp_engine import score_lead_icp, detect_buying_signals
+                from models.lead import Lead as _Lead
+                _tmp_lead = _Lead(
+                    name=place.get("name", "unnamed"),
+                    phone=place.get("formatted_phone_number") or None,
+                    email="noreply@placeholder.com" if not place.get("formatted_phone_number") else None,
+                    raw_data={
+                        "rating": place.get("rating"),
+                        "review_count": place.get("user_ratings_total"),
+                        "description": result.get("reason", ""),
+                        "gemini_category": result.get("category", ""),
+                    },
+                )
+                _icp_score, _icp_segment = score_lead_icp(_tmp_lead)
+                _signals = detect_buying_signals(_tmp_lead)
+            except Exception as _icp_err:
+                logger.warning(f"ICP scoring failed [{place.get('name')}]: {_icp_err}")
+
             lead_data = LeadCreate(
                 name=place.get("name", ""),
                 phone=place.get("formatted_phone_number", ""),
@@ -380,6 +401,9 @@ async def run_prospecting_engine(
                 category="food_transport",  # All prospecting leads are food businesses
                 score=result.get("score", 50),
                 priority=result.get("priority", "medium"),
+                icp_score=_icp_score,
+                icp_segment=_icp_segment,
+                buying_signals=_signals,
                 raw_data={
                     "place": {k: v for k, v in place.items() if k != "_raw"},
                     "draft_message": result.get("message", ""),

@@ -64,34 +64,54 @@ async def get_dashboard_data(supabase_client: Any) -> dict:
     week_leads   = sum(1 for l in leads if l.get("created_at", "") >= week)
     month_leads  = sum(1 for l in leads if l.get("created_at", "") >= month)
 
-    # Pipeline stages
     by_stage: dict[str, int] = {s[0]: 0 for s in DEAL_STAGES}
     by_priority: dict[str, int] = {}
     by_source:   dict[str, int] = {}
+    by_icp:      dict[str, int] = {}
 
-    scores, budgets, revenues, deal_values = [], [], [], []
+    scores, monthly_revenues = [], []
     won_count = lost_count = meeting_count = proposal_count = qualified_count = 0
     response_times = []
+    total_pipeline = 0.0   # annual pipeline
+    total_actual   = 0.0
 
     for l in leads:
-        stage    = str(l.get("deal_stage") or "lead").replace("LeadStatus.", "")
-        priority = str(l.get("priority") or "low").replace("LeadPriority.", "")
-        source   = str(l.get("source")   or "manual").replace("LeadSource.", "")
+        raw_stage = str(l.get("deal_stage") or l.get("status") or "NEW_LEAD")
+        # Normalise to lowercase stage key used in DEAL_STAGES list
+        stage = raw_stage.lower().replace("leadstatus.", "")
+        # Map new DealStage enum values to display keys
+        stage_map = {
+            "new_lead": "lead", "qualified": "qualified", "contacted": "contacted",
+            "meeting_booked": "meeting_scheduled", "proposal_sent": "proposal_sent",
+            "negotiation": "negotiation", "won": "won", "lost": "lost",
+            # legacy statuses
+            "new": "lead", "quotation_requested": "proposal_sent",
+            "quotation_sent": "proposal_sent", "unqualified": "lost",
+        }
+        stage = stage_map.get(stage, stage)
 
-        # Normalise old status → stage
-        status = str(l.get("status") or "new").replace("LeadStatus.", "")
-        if stage == "lead" and status in ("contacted", "qualified", "converted"):
-            stage = {"contacted": "contacted", "qualified": "qualified", "converted": "won"}.get(status, stage)
+        priority = str(l.get("priority") or "low").replace("LeadPriority.", "").lower()
+        source   = str(l.get("source")   or "manual").replace("LeadSource.", "").lower()
+        icp_seg  = str(l.get("icp_segment") or "—").lower()
 
-        by_stage[stage] = by_stage.get(stage, 0) + 1
+        by_stage[stage]    = by_stage.get(stage, 0) + 1
         by_priority[priority] = by_priority.get(priority, 0) + 1
-        by_source[source]     = by_source.get(source, 0) + 1
+        by_source[source]  = by_source.get(source, 0) + 1
+        by_icp[icp_seg]    = by_icp.get(icp_seg, 0) + 1
 
-        if l.get("score"):         scores.append(l["score"])
-        if l.get("budget_monthly"): budgets.append(float(l["budget_monthly"]))
-        if l.get("estimated_monthly_revenue"): revenues.append(float(l["estimated_monthly_revenue"]))
-        if l.get("expected_deal_value"):       deal_values.append(float(l["expected_deal_value"]))
-        if l.get("response_time_minutes"):     response_times.append(int(l["response_time_minutes"]))
+        if l.get("score"):
+            scores.append(int(l["score"]))
+
+        monthly = float(l.get("expected_monthly_revenue") or l.get("budget_monthly") or 0)
+        if monthly > 0:
+            monthly_revenues.append(monthly)
+
+        close_prob = float(l.get("expected_close_probability") or 0) or 0.10
+        total_pipeline += monthly * 12 * close_prob
+        total_actual   += float(l.get("actual_revenue") or 0)
+
+        if l.get("response_time_minutes"):
+            response_times.append(int(l["response_time_minutes"]))
 
         if stage == "won":               won_count += 1
         if stage == "lost":              lost_count += 1
@@ -99,17 +119,17 @@ async def get_dashboard_data(supabase_client: Any) -> dict:
         if stage == "proposal_sent":     proposal_count += 1
         if stage == "qualified":         qualified_count += 1
 
-    avg_score   = round(sum(scores) / len(scores), 1) if scores else 0
-    avg_budget  = round(sum(budgets) / len(budgets))  if budgets else 0
-    avg_deal    = round(sum(deal_values) / len(deal_values)) if deal_values else avg_budget * 12
-    pipeline_v  = round(sum(deal_values)) if deal_values else 0
-    rev_forecast = round(pipeline_v * 0.25)  # 25% expected to close
+    avg_score    = round(sum(scores) / len(scores), 1) if scores else 0
+    avg_monthly  = round(sum(monthly_revenues) / len(monthly_revenues)) if monthly_revenues else 0
+    avg_deal     = avg_monthly * 12
+    pipeline_v   = round(total_pipeline)
+    rev_forecast = pipeline_v  # already weighted by close_probability
 
     qualified_total = sum(1 for l in leads if (l.get("score") or 0) >= 40)
     conversion_rate = round(won_count / qualified_total * 100, 1) if qualified_total else 0
 
     avg_response = round(sum(response_times) / len(response_times), 0) if response_times else None
-    sla_ok = sum(1 for t in response_times if t <= 15)
+    sla_ok   = sum(1 for t in response_times if t <= 15)
     sla_rate = round(sla_ok / len(response_times) * 100, 0) if response_times else None
 
     top_leads = sorted(
@@ -117,23 +137,34 @@ async def get_dashboard_data(supabase_client: Any) -> dict:
         key=lambda x: x.get("score", 0), reverse=True
     )[:8]
 
-    # Today's outbound messages (leads contacted today)
     today_messages = sorted(
-        [l for l in leads if l.get("status") == "contacted" and l.get("updated_at", l.get("created_at", "")) >= today],
+        [l for l in leads
+         if l.get("status") == "contacted"
+         and l.get("updated_at", l.get("created_at", "")) >= today],
         key=lambda x: x.get("updated_at", x.get("created_at", "")), reverse=True
     )[:20]
+
+    # Attribution (top sources by lead count)
+    try:
+        from processors.attribution import compute_attribution, attribution_to_dict
+        attribution = attribution_to_dict(compute_attribution(leads))
+    except Exception:
+        attribution = {}
 
     return {
         "total": total, "today": today_leads, "week": week_leads, "month": month_leads,
         "qualified": qualified_count, "meetings": meeting_count,
         "proposals": proposal_count, "won": won_count, "lost": lost_count,
-        "avg_score": avg_score, "avg_budget": avg_budget, "avg_deal": avg_deal,
+        "avg_score": avg_score, "avg_budget": avg_monthly, "avg_deal": avg_deal,
         "pipeline_value": pipeline_v, "revenue_forecast": rev_forecast,
+        "actual_revenue": round(total_actual),
         "conversion_rate": conversion_rate,
         "by_stage": by_stage, "by_priority": by_priority, "by_source": by_source,
+        "by_icp": by_icp,
         "avg_response_min": avg_response, "sla_rate": sla_rate,
         "top_leads": top_leads,
         "today_messages": today_messages,
+        "attribution": attribution,
         "generated_at": now.isoformat(),
     }
 
@@ -200,9 +231,12 @@ def render_dashboard_html(data: dict) -> str:
     avg_deal   = data["avg_deal"]
     pipeline_v = data["pipeline_value"]
     rev_fore   = data["revenue_forecast"]
+    actual_rev = data.get("actual_revenue", 0)
     conv_rate  = data["conversion_rate"]
     by_stage   = data["by_stage"]
     by_source  = data["by_source"]
+    by_icp     = data.get("by_icp", {})
+    attribution = data.get("attribution", {})
     top_leads       = data["top_leads"]
     today_messages  = data.get("today_messages", [])
     avg_resp        = data["avg_response_min"]
@@ -213,6 +247,14 @@ def render_dashboard_html(data: dict) -> str:
     SOURCE_AR = {"website": "الموقع", "whatsapp": "واتساب", "ads": "إعلانات",
                  "linkedin": "LinkedIn", "manual": "يدوي", "google_forms": "نموذج",
                  "telegram": "Telegram", "serpapi_prospecting": "خرائط جوجل"}
+    ICP_AR = {
+        "premium_fb":    "Premium F&B 🍫",
+        "pharma_beauty": "Pharma & Beauty 💊",
+        "fresh_food":    "Fresh Food 🥩",
+        "horeca":        "HoReCa 🏨",
+        "not_icp":       "خارج ICP",
+        "—":             "غير محدد",
+    }
 
     # ── Pipeline Funnel ────────────────────────────────────────────────────────
     max_stage = max(by_stage.values(), default=1) or 1
@@ -246,6 +288,43 @@ def render_dashboard_html(data: dict) -> str:
             <div style="width:{pct}%;background:#3b82f6;height:8px;border-radius:4px"></div>
           </div>
         </div>"""
+
+    # ── ICP Distribution ──────────────────────────────────────────────────────
+    max_icp = max(by_icp.values(), default=1) or 1
+    icp_bars = ""
+    ICP_COLORS = {
+        "premium_fb": "#8b5cf6", "pharma_beauty": "#3b82f6",
+        "fresh_food": "#22c55e", "horeca": "#f59e0b",
+        "not_icp": "#94a3b8", "—": "#e2e8f0",
+    }
+    for seg, cnt in sorted(by_icp.items(), key=lambda x: -x[1]):
+        pct = max(4, round(cnt / max_icp * 100))
+        color = ICP_COLORS.get(seg, "#64748b")
+        label = ICP_AR.get(seg, seg)
+        icp_bars += f"""
+        <div style="margin-bottom:10px">
+          <div style="display:flex;justify-content:space-between;margin-bottom:3px">
+            <span style="font-size:13px">{label}</span>
+            <strong style="font-size:13px">{cnt}</strong>
+          </div>
+          <div style="background:#f1f5f9;border-radius:4px;height:8px">
+            <div style="width:{pct}%;background:{color};height:8px;border-radius:4px"></div>
+          </div>
+        </div>"""
+
+    # ── Attribution Table ──────────────────────────────────────────────────────
+    attr_rows = ""
+    for src in (attribution.get("by_source") or [])[:6]:
+        attr_rows += f"""
+        <tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:8px 12px;font-size:13px">{src.get('source_ar', src.get('source',''))}</td>
+          <td style="padding:8px 12px;text-align:center;font-weight:600">{src.get('total_leads',0)}</td>
+          <td style="padding:8px 12px;text-align:center;color:#22c55e;font-weight:600">{src.get('won_leads',0)}</td>
+          <td style="padding:8px 12px;text-align:center">{src.get('win_rate_pct',0)}%</td>
+          <td style="padding:8px 12px;text-align:center;color:#059669">{int(src.get('revenue_sar',0)):,}</td>
+        </tr>"""
+    if not attr_rows:
+        attr_rows = '<tr><td colspan="5" style="text-align:center;padding:20px;color:#94a3b8">لا بيانات attribution بعد</td></tr>'
 
     # ── Top Leads Table ────────────────────────────────────────────────────────
     rows = ""
@@ -358,6 +437,54 @@ def render_dashboard_html(data: dict) -> str:
         <div style="font-size:12px;color:#64748b;margin-bottom:6px">الهدف: &lt; 5 دقائق للأولوية العالية</div>
         {sla_html}
       </div>
+    </div>
+  </div>
+
+  <!-- ICP + Attribution -->
+  <div class="grid">
+    <div class="card">
+      <h2>🎯 توزيع ICP — شرائح العميل المثالي</h2>
+      {icp_bars or '<p style="color:#94a3b8">لا بيانات ICP بعد</p>'}
+    </div>
+    <div class="card">
+      <h2>📊 Attribution — أداء المصادر</h2>
+      <table>
+        <thead><tr>
+          <th>المصدر</th><th>Leads</th><th>Won</th><th>Win Rate</th><th>إيراد (ر)</th>
+        </tr></thead>
+        <tbody>{attr_rows}</tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Revenue numbers -->
+  <div class="grid">
+    <div class="card" style="background:linear-gradient(135deg,#0f172a,#1e3a5f);color:white">
+      <h2 style="color:rgba(255,255,255,.7);border-color:rgba(255,255,255,.1)">💵 ملخص الإيرادات</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+        <div style="text-align:center;padding:14px;background:rgba(255,255,255,.08);border-radius:8px">
+          <div style="font-size:20px;font-weight:700">{pipeline_v:,}</div>
+          <div style="font-size:11px;opacity:.7;margin-top:4px">Pipeline Value (ر)</div>
+        </div>
+        <div style="text-align:center;padding:14px;background:rgba(255,255,255,.08);border-radius:8px">
+          <div style="font-size:20px;font-weight:700;color:#34d399">{rev_fore:,}</div>
+          <div style="font-size:11px;opacity:.7;margin-top:4px">Forecast Revenue (ر)</div>
+        </div>
+        <div style="text-align:center;padding:14px;background:rgba(255,255,255,.08);border-radius:8px">
+          <div style="font-size:20px;font-weight:700;color:#fbbf24">{actual_rev:,}</div>
+          <div style="font-size:11px;opacity:.7;margin-top:4px">Actual Revenue (ر)</div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>📈 Win Rate & KPIs</h2>
+      <table style="font-size:13px">
+        <tr><td style="padding:6px 0;color:#64748b">Win Rate</td><td style="padding:6px 0;font-weight:600;text-align:left;color:#22c55e">{conv_rate}%</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b">Avg Deal Size (سنوي)</td><td style="padding:6px 0;font-weight:600;text-align:left">{avg_deal:,} ر</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b">Qualified Leads</td><td style="padding:6px 0;font-weight:600;text-align:left">{qualified}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b">Won Deals</td><td style="padding:6px 0;font-weight:600;color:#16a34a;text-align:left">{won}</td></tr>
+        <tr><td style="padding:6px 0;color:#64748b">Avg Score</td><td style="padding:6px 0;font-weight:600;text-align:left">{avg_score}/100</td></tr>
+      </table>
     </div>
   </div>
 

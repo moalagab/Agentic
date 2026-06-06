@@ -718,6 +718,133 @@ async def run_outbound_send() -> dict:
     return {"success": True, "results": results}
 
 
+# ── ICP / Revenue / Attribution Endpoints ────────────────────────────────────
+
+@app.get("/api/revenue/forecast", tags=["Revenue"])
+async def get_revenue_forecast() -> dict:
+    """
+    Compute pipeline forecast using Revenue Forecast Engine.
+    يحسب توقعات الإيرادات بناءً على Pipeline الحالي.
+    """
+    try:
+        from supabase import create_client
+        from processors.revenue_forecast import compute_pipeline_summary, forecast_to_dict
+        from models.lead import Lead
+
+        settings = get_settings()
+        if not settings.is_supabase_configured():
+            return {"success": False, "error": "Supabase not configured"}
+
+        sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        rows = sb.table("leads").select("*").execute().data or []
+        leads = [Lead(**r) for r in rows if _safe_lead(r)]
+        summary = compute_pipeline_summary(leads)
+        return {"success": True, "forecast": forecast_to_dict(summary)}
+    except Exception as exc:
+        logger.error("Revenue forecast failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/attribution/report", tags=["Revenue"])
+async def get_attribution_report() -> dict:
+    """
+    Attribution report — which sources generate revenue.
+    تقرير Attribution: أي مصادر تولّد إيرادات.
+    """
+    try:
+        from supabase import create_client
+        from processors.attribution import compute_attribution, attribution_to_dict
+
+        settings = get_settings()
+        if not settings.is_supabase_configured():
+            return {"success": False, "error": "Supabase not configured"}
+
+        sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        rows = sb.table("leads").select("*").execute().data or []
+        report = compute_attribution(rows)
+        return {"success": True, "attribution": attribution_to_dict(report)}
+    except Exception as exc:
+        logger.error("Attribution report failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class ICPScoreRequest(BaseModel):
+    lead_id: Optional[str] = None
+    name: str
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    rating: Optional[float] = None
+    review_count: Optional[int] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+
+
+@app.post("/api/icp/score", tags=["Revenue"])
+async def score_lead_icp_endpoint(req: ICPScoreRequest) -> dict:
+    """
+    Score a lead against the 4 ICP profiles.
+    يقيّم العميل على 4 شرائح ICP.
+    """
+    try:
+        from processors.icp_engine import score_lead_icp, detect_buying_signals
+        from models.lead import Lead
+
+        lead = Lead(
+            name=req.name,
+            company=req.company,
+            phone=req.phone or None,
+            email="noreply@placeholder.com" if not req.phone else None,
+            raw_data={
+                "rating": req.rating,
+                "review_count": req.review_count,
+                "description": req.description,
+                "gemini_category": req.category,
+            },
+        )
+        icp_score, icp_segment = score_lead_icp(lead)
+        signals = detect_buying_signals(lead)
+        return {
+            "success": True,
+            "icp_score": icp_score,
+            "icp_segment": icp_segment,
+            "buying_signals": signals,
+            "lead_name": req.name,
+        }
+    except Exception as exc:
+        logger.error("ICP scoring failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+class RAGRequest(BaseModel):
+    query: str = Field(..., min_length=3)
+
+
+@app.post("/api/knowledge/ask", tags=["Knowledge Base"])
+async def knowledge_ask(req: RAGRequest, settings: Settings = Depends(get_settings_dep)) -> dict:
+    """
+    Ask the knowledge base a question using RAG.
+    يجيب على أسئلة الخدمات والأسعار من قاعدة المعرفة.
+    """
+    try:
+        from processors.rag_engine import rag_answer, list_topics
+        answer = await rag_answer(req.query, settings.GEMINI_API_KEY)
+        return {"success": True, "query": req.query, "answer": answer}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.get("/api/knowledge/topics", tags=["Knowledge Base"])
+async def knowledge_topics() -> dict:
+    """List available knowledge base topics."""
+    from processors.rag_engine import list_topics
+    return {"topics": list_topics()}
+
+
+def _safe_lead(row: dict) -> bool:
+    """Return True if row has minimum required fields for Lead model."""
+    return bool(row.get("name")) and bool(row.get("phone") or row.get("email"))
+
+
 # ── Learning Loop Endpoints (Layer 10) ────────────────────────────────────────
 
 @app.post("/api/insights/run-analysis", tags=["Intelligence"])
