@@ -63,23 +63,28 @@ class TelegramHandler:
             return None
 
     async def send_message(self, chat_id: str, text: str) -> bool:
-        """Send a message to a Telegram chat."""
+        """Send a message to a Telegram chat. Falls back to plain text on Markdown parse errors."""
         url = TELEGRAM_API.format(token=self.token, method="sendMessage")
-        payload = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": "Markdown",
-        }
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.post(url, json=payload)
-                ok = r.json().get("ok", False)
-                if not ok:
-                    self._log.warning("Telegram send failed", response=r.json())
-                return ok
-        except Exception as exc:
-            self._log.error("send_message failed", chat_id=chat_id, error=str(exc))
-            return False
+        for parse_mode in ("Markdown", None):
+            payload: dict = {"chat_id": chat_id, "text": text}
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    r = await client.post(url, json=payload)
+                    data = r.json()
+                    if data.get("ok"):
+                        return True
+                    desc = data.get("description", "")
+                    if parse_mode and "parse entities" in desc:
+                        self._log.warning("Telegram Markdown parse failed, retrying as plain text")
+                        continue
+                    self._log.warning("Telegram send failed", response=data)
+                    return False
+            except Exception as exc:
+                self._log.error("send_message failed", chat_id=chat_id, error=str(exc))
+                return False
+        return False
 
     async def set_webhook(self, webhook_url: str) -> bool:
         """Register the webhook URL with Telegram."""

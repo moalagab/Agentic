@@ -148,7 +148,7 @@ async def lifespan(app: FastAPI):
     if settings.has_telegram_owners() and _tg_handler:
         from processors.proposal_generator import ProposalApprovalManager
         _proposal_manager = ProposalApprovalManager(
-            anthropic_key=settings.ANTHROPIC_API_KEY,
+            anthropic_key=settings.GEMINI_API_KEY,
             telegram_handler=_tg_handler,
             wa_notifier=_wa_notifier,
             owner_chat_ids=[str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])],
@@ -159,7 +159,7 @@ async def lifespan(app: FastAPI):
     _cpq_engine = CPQEngine()
     log.info("CPQ engine initialized")
 
-    _content_engine = ContentEngine(anthropic_api_key=settings.ANTHROPIC_API_KEY)
+    _content_engine = ContentEngine(gemini_api_key=settings.GEMINI_API_KEY)
     log.info("Content engine initialized")
 
     if settings.is_supabase_configured():
@@ -169,13 +169,13 @@ async def lifespan(app: FastAPI):
             _cs_engine = CustomerSuccessEngine(supabase_client=_sb, notifier=_pipeline.notifier)
             _learning_loop = LearningLoop(
                 supabase_client=_sb,
-                anthropic_api_key=settings.ANTHROPIC_API_KEY,
+                anthropic_api_key=settings.GEMINI_API_KEY,
                 notifier=_pipeline.notifier,
             )
             _outbound_sender = OutboundSender(
                 crm=_pipeline.primary_crm,
-                notifier=_pipeline.notifier,
-                anthropic_api_key=settings.ANTHROPIC_API_KEY,
+                notifier=_wa_notifier,  # WhatsApp (WAHA), not Telegram
+                anthropic_api_key=settings.GEMINI_API_KEY,
             )
             log.info("Customer Success + Learning Loop + Outbound Sender initialized")
         except Exception as exc:
@@ -462,8 +462,8 @@ async def generate_proposal(
             }
         else:
             # Direct generation (no approval flow)
-            proposal_text = await generate_proposal_text(lead_dict, settings.ANTHROPIC_API_KEY)
-            file_path = await create_and_save_proposal(lead_dict, settings.ANTHROPIC_API_KEY)
+            proposal_text = await generate_proposal_text(lead_dict, settings.GEMINI_API_KEY)
+            file_path = await create_and_save_proposal(lead_dict, settings.GEMINI_API_KEY)
             return {
                 "success": True,
                 "status": "generated",
@@ -674,6 +674,47 @@ async def run_cs_check() -> dict:
     if not _cs_engine:
         raise HTTPException(status_code=503, detail="Customer Success engine not initialized")
     results = await _cs_engine.run_daily_check()
+    return {"success": True, "results": results}
+
+
+@app.post("/api/prospecting/run", tags=["Demand Generation"])
+async def run_prospecting() -> dict:
+    """Manually trigger the Google Maps prospecting engine (Demand Generation)."""
+    try:
+        from processors.google_maps_engine import run_prospecting_engine
+        from crm.supabase_crm import SupabaseCRM
+        crm = _pipeline.primary_crm if _pipeline else None
+        if not crm:
+            raise HTTPException(status_code=503, detail="CRM not initialized")
+        settings = __import__("config").get_settings()
+
+        async def _notify(msg: str):
+            if _wa_notifier:
+                owner_phone = getattr(settings, "OWNER_PHONE", "")
+                if owner_phone:
+                    await _wa_notifier.send_custom_message(owner_phone, msg)
+
+        results = await run_prospecting_engine(
+            outscraper_api_key=settings.OUTSCRAPER_API_KEY,
+            crm=crm,
+            notify_callback=_notify,
+            gemini_api_key=settings.GEMINI_API_KEY,
+        )
+        return {"success": True, "found": len(results), "prospects": [
+            {"name": r.get("place", {}).get("name"), "score": r.get("score"), "priority": r.get("priority")}
+            for r in results[:10]
+        ]}
+    except Exception as exc:
+        logger.error("Prospecting run failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/outbound/send", tags=["Demand Generation"])
+async def run_outbound_send() -> dict:
+    """Manually trigger outbound WhatsApp sends to serpapi prospects."""
+    if not _outbound_sender:
+        raise HTTPException(status_code=503, detail="OutboundSender not initialized")
+    results = await _outbound_sender.send_pending_outreach()
     return {"success": True, "results": results}
 
 

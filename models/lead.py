@@ -21,6 +21,7 @@ class LeadSource(str, Enum):
     GOOGLE_FORMS = "google_forms"
     ADS = "ads"
     MANUAL = "manual"
+    SERPAPI_PROSPECTING = "serpapi_prospecting"
 
 
 class LeadStatus(str, Enum):
@@ -155,6 +156,10 @@ class LeadCreate(BaseModel):
     budget_monthly: Optional[float] = Field(None, ge=0)
     notes: Optional[str] = Field(None)
     raw_data: dict[str, Any] = Field(default_factory=dict)
+    # Fields used by serpapi prospecting engine
+    score: int = Field(default=0, ge=0, le=100)
+    priority: LeadPriority = Field(default=LeadPriority.MEDIUM)
+    category: LeadCategory = Field(default=LeadCategory.OTHER)
 
     @field_validator("phone")
     @classmethod

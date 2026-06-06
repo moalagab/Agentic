@@ -1,9 +1,6 @@
 """
-Core Smartfield Lead Generation Agent powered by Claude.
-وكيل توليد العملاء المحتملين الأساسي المدعوم بكلود
-
-Uses Claude's tool_use capability in an agentic loop to fully process leads:
-classify, deduplicate, save to CRM, notify sales team, and schedule follow-ups.
+Core Smartfield Lead Generation Agent powered by Gemini.
+وكيل توليد العملاء المحتملين الأساسي — مدعوم بـ Google Gemini
 """
 
 from __future__ import annotations
@@ -12,10 +9,10 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-import anthropic
 import structlog
 
-from agent.prompts import SYSTEM_PROMPT_AR, TOOL_RESULT_PROMPT
+from agent.ai_client import run_agentic_loop
+from agent.prompts import SYSTEM_PROMPT_AR
 from agent.tools import TOOL_DEFINITIONS
 from models.lead import Lead, LeadCategory, LeadCreate, LeadPriority, LeadStatus, ProcessedLead
 
@@ -26,9 +23,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# Maximum number of agentic loop iterations to prevent infinite loops
 MAX_ITERATIONS = 10
-CLAUDE_MODEL = "claude-sonnet-4-6"
 
 
 class SmartfieldLeadAgent:
@@ -48,7 +43,6 @@ class SmartfieldLeadAgent:
         self.crm_client = crm_client
         self.fallback_crm = fallback_crm
         self.notifier = notifier
-        self.client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self._log = logger.bind(component="SmartfieldLeadAgent")
 
     async def process_lead(
@@ -99,132 +93,67 @@ class SmartfieldLeadAgent:
         )
         log.info("Starting lead processing")
 
-        # ── Build the initial user message with lead data ──────────────────────
+        # ── Build the initial user message ─────────────────────────────────────
         user_message = self._build_user_message(lead_create, pre_scored=pre_scored)
 
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": user_message},
-        ]
-
-        # Accumulate state from tool results throughout the loop
+        # Accumulate state updated by tool callbacks
         classification_result: dict[str, Any] = {}
         crm_id: str | None = None
         notification_sent = False
         crm_saved = False
-        final_text: str = ""
 
-        iteration = 0
+        # ── Tool executor callback (called by ai_client for each tool call) ────
+        async def _tool_executor(tool_name: str, tool_input: dict) -> dict:
+            nonlocal classification_result, crm_id, notification_sent, crm_saved
 
-        # ── Agentic loop: keep calling Claude until it stops using tools ──────
-        while iteration < MAX_ITERATIONS:
-            iteration += 1
-            log.debug("Agent iteration", iteration=iteration)
-
-            try:
-                response = await self.client.messages.create(
-                    model=CLAUDE_MODEL,
-                    max_tokens=4096,
-                    system=[
-                        {
-                            "type": "text",
-                            "text": SYSTEM_PROMPT_AR,
-                            "cache_control": {"type": "ephemeral"},  # prompt caching
-                        }
-                    ],
-                    tools=TOOL_DEFINITIONS,
-                    messages=messages,
-                )
-            except anthropic.APIError as exc:
-                log.error("Claude API error", error=str(exc), iteration=iteration)
-                break
-
-            log.debug(
-                "Claude response received",
-                stop_reason=response.stop_reason,
-                content_blocks=len(response.content),
+            log.info("Executing tool", tool=tool_name, input_keys=list(tool_input.keys()))
+            result = await self._execute_tool(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                lead=lead,
+                classification_result=classification_result,
+                crm_id=crm_id,
             )
 
-            # Collect text from this response
-            for block in response.content:
-                if hasattr(block, "text"):
-                    final_text = block.text
+            if tool_name == "classify_lead":
+                classification_result = result
+                self._apply_classification(lead, result)
+            elif tool_name == "create_crm_lead":
+                crm_id = result.get("crm_id")
+                if crm_id:
+                    lead.crm_id = crm_id
+                    crm_saved = True
+            elif tool_name == "send_whatsapp_notification":
+                notification_sent = result.get("success", False)
+            elif tool_name == "search_existing_lead":
+                existing = result.get("existing_lead")
+                if existing:
+                    crm_id = existing.get("crm_id")
+                    log.info("Duplicate lead found", existing_crm_id=crm_id)
 
-            # If Claude is done (no more tool calls), exit the loop
-            if response.stop_reason == "end_turn":
-                log.info("Agent completed processing (end_turn)")
-                break
+            return result
 
-            # Gather all tool_use blocks
-            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
-            if not tool_use_blocks:
-                log.info("No tool calls in response; stopping loop")
-                break
-
-            # Append Claude's response to message history
-            messages.append({"role": "assistant", "content": response.content})
-
-            # ── Execute each tool and collect results ──────────────────────────
-            tool_results: list[dict[str, Any]] = []
-            for tool_block in tool_use_blocks:
-                tool_name = tool_block.name
-                tool_input = tool_block.input
-                tool_calls_made.append(tool_name)
-
-                log.info("Executing tool", tool=tool_name, input_keys=list(tool_input.keys()))
-
-                try:
-                    result = await self._execute_tool(
-                        tool_name=tool_name,
-                        tool_input=tool_input,
-                        lead=lead,
-                        classification_result=classification_result,
-                        crm_id=crm_id,
-                    )
-
-                    # Update agent state from tool results
-                    if tool_name == "classify_lead":
-                        classification_result = result
-                        # Apply classification to lead object
-                        lead = self._apply_classification(lead, result)
-
-                    elif tool_name == "create_crm_lead":
-                        crm_id = result.get("crm_id")
-                        if crm_id:
-                            lead.crm_id = crm_id
-                            crm_saved = True
-
-                    elif tool_name == "send_whatsapp_notification":
-                        notification_sent = result.get("success", False)
-
-                    elif tool_name == "search_existing_lead":
-                        existing = result.get("existing_lead")
-                        if existing:
-                            # Use existing CRM ID if found
-                            crm_id = existing.get("crm_id")
-                            log.info("Duplicate lead found", existing_crm_id=crm_id)
-
-                    log.debug("Tool result", tool=tool_name, result_keys=list(result.keys()))
-
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    })
-
-                except Exception as exc:
-                    log.error("Tool execution failed", tool=tool_name, error=str(exc))
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_block.id,
-                        "content": json.dumps(
-                            {"error": str(exc), "tool": tool_name},
-                            ensure_ascii=False,
-                        ),
-                        "is_error": True,
-                    })
-
-            # Feed tool results back to Claude for the next iteration
-            messages.append({"role": "user", "content": tool_results})
+        # ── Run Gemini agentic loop ────────────────────────────────────────────
+        try:
+            loop_result = await run_agentic_loop(
+                api_key=self.config.GEMINI_API_KEY,
+                system=SYSTEM_PROMPT_AR,
+                user_message=user_message,
+                tools=TOOL_DEFINITIONS,
+                tool_executor=_tool_executor,
+                max_iterations=MAX_ITERATIONS,
+            )
+            tool_calls_made = loop_result["tool_calls"]
+            final_text = loop_result["final_text"]
+            log.info(
+                "Gemini agentic loop complete",
+                iterations=loop_result["iterations"],
+                tool_calls=tool_calls_made,
+            )
+        except Exception as exc:
+            log.error("Gemini agentic loop failed", error=str(exc))
+            tool_calls_made = []
+            final_text = ""
 
         # ── Build final ProcessedLead ──────────────────────────────────────────
         elapsed_ms = (time.monotonic() - start_ts) * 1000

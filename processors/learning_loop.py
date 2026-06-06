@@ -253,7 +253,7 @@ class LearningLoop:
 
     async def _generate_narrative(self, report: dict) -> str:
         """Use Claude to write an Arabic narrative summary of the analysis."""
-        import anthropic
+        from agent.ai_client import get_text
 
         wl = report.get("win_loss", {})
         icp = report.get("icp_insights", {})
@@ -273,13 +273,7 @@ class LearningLoop:
 2. أكبر فرصة للتحسين
 3. توصية واحدة قابلة للتنفيذ الأسبوع القادم"""
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text.strip()
+        return await get_text(self.api_key, "", prompt, max_tokens=400)
 
     def _format_report_ar(self, report: dict) -> str:
         """Format the full report as a readable Arabic message."""

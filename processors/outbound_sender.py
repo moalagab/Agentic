@@ -2,8 +2,8 @@
 Outbound Sender — محرك إرسال الـ Outreach
 Layer 2 of RevOS v6
 
-يقرأ من outbound_leads (status='new' + phone موجود)
-يولّد رسالة مخصصة بـ Claude (صناعة + مدينة + حجم)
+يقرأ من leads (source='serpapi_prospecting', status='new', phone موجود)
+يستخدم draft_message المحفوظ من google_maps_engine مباشرةً
 يرسل عبر WAHA
 يحدّث الحالة إلى 'contacted'
 """
@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import structlog
 
-from agent.cold_outreach import generate_claude_message
+from agent.cold_outreach import build_outreach_for_prospect
 
 if TYPE_CHECKING:
     from crm.supabase_crm import SupabaseCRM
@@ -27,8 +27,8 @@ logger = structlog.get_logger(__name__)
 
 class OutboundSender:
     """
-    Reads outbound_leads with phone numbers and sends personalized
-    WhatsApp messages via WAHA. Updates status after sending.
+    Reads serpapi prospects from the leads table and sends personalized
+    WhatsApp messages via WAHA. Updates status to contacted after sending.
     """
 
     def __init__(
@@ -47,7 +47,7 @@ class OutboundSender:
     async def send_pending_outreach(self) -> dict:
         """
         Main entry point — called daily after morning prospecting.
-        Sends to outbound_leads where phone is set and status = 'new'.
+        Sends to leads where source='serpapi_prospecting', phone is set, status='new'.
         """
         results = {
             "sent": 0,
@@ -70,32 +70,32 @@ class OutboundSender:
                 results["skipped_no_phone"] += 1
                 continue
 
-            try:
-                # Build prospect dict from outbound_leads row
-                prospect = {
-                    "company": lead.get("company_name", ""),
-                    "city": lead.get("city", ""),
-                    "activity": lead.get("industry", ""),
-                    "cold_need": lead.get("raw_data", {}).get("cold_need", ""),
-                    "fleet_est": lead.get("raw_data", {}).get("fleet_est", 3),
-                    "budget_sar": lead.get("score", 0) * 400,  # rough estimate
-                }
-                segment_id = lead.get("raw_data", {}).get("segment_id", "generic")
+            company = lead.get("name", "")
+            raw = lead.get("raw_data") or {}
+            if isinstance(raw, str):
+                import json
+                try:
+                    raw = json.loads(raw)
+                except Exception:
+                    raw = {}
 
-                # Claude writes the message (industry + city + size)
-                message = await generate_claude_message(prospect, segment_id, self.api_key)
+            try:
+                # Use draft_message pre-written by google_maps_engine (Gemini)
+                message = raw.get("draft_message", "").strip()
+                if not message:
+                    # Fallback: build from template
+                    prospect = {"company": company, "city": "", "activity": ""}
+                    message = build_outreach_for_prospect(prospect, "generic")
 
                 # Send via WAHA
                 sent = await self.notifier.send_custom_message(phone, message)
 
                 if sent:
-                    # Update status → contacted
                     await self._mark_contacted(lead["id"], message)
                     results["sent"] += 1
                     self._log.info(
                         "outbound_sender.sent",
-                        company=lead.get("company_name"),
-                        city=lead.get("city"),
+                        company=company,
                         phone=phone,
                     )
                 else:
@@ -106,19 +106,20 @@ class OutboundSender:
 
             except Exception as exc:
                 results["failed"] += 1
-                results["errors"].append(f"{lead.get('company_name')}: {str(exc)[:80]}")
-                self._log.error("outbound_sender.error", company=lead.get("company_name"), error=str(exc))
+                results["errors"].append(f"{company}: {str(exc)[:80]}")
+                self._log.error("outbound_sender.error", company=company, error=str(exc))
 
         self._log.info("outbound_sender.complete", **{k: v for k, v in results.items() if k != "errors"})
         return results
 
     async def _fetch_pending(self, limit: int) -> list[dict]:
-        """Read outbound_leads with phone set and status='new'."""
+        """Read serpapi prospects from leads table with phone set and status='new'."""
         try:
             result = await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.crm.client.table("outbound_leads")
+                lambda: self.crm.client.table("leads")
                     .select("*")
+                    .eq("source", "serpapi_prospecting")
                     .eq("status", "new")
                     .not_.is_("phone", "null")
                     .neq("phone", "")
@@ -132,15 +133,15 @@ class OutboundSender:
             return []
 
     async def _mark_contacted(self, lead_id: str, message: str) -> None:
-        """Update outbound_lead status to contacted."""
+        """Update lead status to contacted."""
         try:
             now = datetime.utcnow().isoformat()
             await asyncio.get_running_loop().run_in_executor(
                 None,
-                lambda: self.crm.client.table("outbound_leads")
+                lambda: self.crm.client.table("leads")
                     .update({
                         "status": "contacted",
-                        "outreach_message": message,
+                        "notes": f"[outbound] {message[:200]}",
                         "updated_at": now,
                     })
                     .eq("id", lead_id)

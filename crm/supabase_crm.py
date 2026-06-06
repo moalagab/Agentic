@@ -16,7 +16,7 @@ import structlog
 from supabase import create_client, Client
 
 from crm.base import BaseCRM
-from models.lead import Lead, LeadCategory, LeadPriority, LeadSource, LeadStatus
+from models.lead import Lead, LeadCategory, LeadCreate, LeadPriority, LeadSource, LeadStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -29,10 +29,10 @@ def _lead_to_row(lead: Lead) -> dict[str, Any]:
         "company": lead.company,
         "phone": lead.phone,
         "email": lead.email,
-        "source": str(lead.source),
-        "status": str(lead.status),
-        "priority": str(lead.priority),
-        "category": str(lead.category),
+        "source": lead.source.value if hasattr(lead.source, "value") else str(lead.source),
+        "status": lead.status.value if hasattr(lead.status, "value") else str(lead.status),
+        "priority": lead.priority.value if hasattr(lead.priority, "value") else str(lead.priority),
+        "category": lead.category.value if hasattr(lead.category, "value") else str(lead.category),
         "cargo_type": lead.cargo_type,
         "route_from": lead.route_from,
         "route_to": lead.route_to,
@@ -115,8 +115,10 @@ class SupabaseCRM(BaseCRM):
         "confidence_score", "probability_to_close", "expected_deal_value",
     })
 
-    async def create_lead(self, lead: Lead) -> str:
-        """Insert lead into Supabase leads table."""
+    async def create_lead(self, lead: "Lead | LeadCreate") -> str:
+        """Insert lead into Supabase leads table. Accepts Lead or LeadCreate."""
+        if isinstance(lead, LeadCreate):
+            lead = Lead(**lead.model_dump())
         log = self._log.bind(lead_id=lead.id, lead_name=lead.name)
 
         row = _lead_to_row(lead)
@@ -248,6 +250,9 @@ class SupabaseCRM(BaseCRM):
             status_counts: dict[str, int] = {}
             for row in (status_result.data or []):
                 s = row.get("status", "unknown")
+                # Normalize "LeadStatus.NEW" → "new"
+                if "." in s:
+                    s = s.split(".")[-1].lower()
                 status_counts[s] = status_counts.get(s, 0) + 1
 
             # By priority
@@ -258,6 +263,9 @@ class SupabaseCRM(BaseCRM):
             priority_counts: dict[str, int] = {}
             for row in (priority_result.data or []):
                 p = row.get("priority", "unknown")
+                # Normalize "LeadPriority.HIGH" → "high"
+                if "." in p:
+                    p = p.split(".")[-1].lower()
                 priority_counts[p] = priority_counts.get(p, 0) + 1
 
             # Avg score

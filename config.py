@@ -22,8 +22,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ─── Anthropic / Claude ───────────────────────────────────────────────────
-    ANTHROPIC_API_KEY: str = Field(..., description="Anthropic API key for Claude")
+    # ─── Anthropic / Claude (legacy — not used, Gemini is primary) ──────────────
+    ANTHROPIC_API_KEY: str = Field(default="", description="Anthropic API key (legacy)")
 
     # ─── Outscraper (Google Maps data) ───────────────────────────────────────
     OUTSCRAPER_API_KEY: str = Field(default="", description="Outscraper API key — outscraper.com")
@@ -193,3 +193,7 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Returns a cached singleton Settings instance."""
     return Settings()
+
+
+# Alias for backward compatibility
+Config = Settings

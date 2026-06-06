@@ -4,7 +4,7 @@ Background task scheduler for Smartfield autonomous agent.
 
 Uses APScheduler for recurring tasks:
 - Daily report at 9 AM (Riyadh time)
-- Morning prospecting at 8 AM (Claude searches for new leads)
+- Google Maps prospecting at 8:15 AM (real businesses via Outscraper)
 - SLA breach check every 2 minutes
 - Follow-up check every 2 hours
 - Weekly report every Sunday at 10 AM
@@ -76,16 +76,6 @@ class SmartfieldScheduler:
             logger.info("scheduler.stopped")
 
     def _register_jobs(self):
-        # Morning prospecting — every day at 8:00 AM (before daily report)
-        self.scheduler.add_job(
-            self._run_morning_prospecting,
-            CronTrigger(hour=8, minute=0, timezone=RIYADH_TZ),
-            id="morning_prospecting",
-            name="البحث الصباحي عن عملاء جدد",
-            replace_existing=True,
-            misfire_grace_time=600,
-        )
-
         # Daily report - every day at 9:00 AM Riyadh time
         self.scheduler.add_job(
             self._run_daily_report,
@@ -186,45 +176,7 @@ class SmartfieldScheduler:
             misfire_grace_time=600,
         )
 
-        logger.info("scheduler.jobs_registered", count=11)
-
-    async def _run_morning_prospecting(self):
-        logger.info("scheduler.running_morning_prospecting")
-        if not self.pipeline:
-            logger.warning("scheduler.prospecting_skipped", reason="pipeline not set")
-            return
-        try:
-            from processors.prospecting_engine import ProspectingEngine
-            engine = ProspectingEngine(config=self.employee.config, pipeline=self.pipeline)
-            results = await engine.run_morning_prospecting(target_total=104)
-            logger.info(
-                "scheduler.prospecting_complete",
-                total=results.get("total_prospects", 0),
-                added=results.get("added_to_crm", 0),
-                segments=results.get("segments_covered", 0),
-                errors=len(results.get("errors", [])),
-            )
-            # 1. Send summary report
-            report = await engine.get_prospecting_report(results)
-            if self.employee.telegram and self.employee._owner_telegram_ids:
-                for chat_id in self.employee._owner_telegram_ids:
-                    await self.employee.telegram.send_message(chat_id, report)
-            else:
-                for phone in self.employee._owner_phones:
-                    await self.employee._send_whatsapp(phone, report)
-
-            # 2. Send outreach briefing (top 10 with ready messages)
-            top_prospects = results.get("top_prospects", [])
-            if top_prospects:
-                briefing = engine.build_outreach_briefing(top_prospects, top_n=10)
-                if self.employee.telegram and self.employee._owner_telegram_ids:
-                    for chat_id in self.employee._owner_telegram_ids:
-                        await self.employee.telegram.send_message(chat_id, briefing)
-                else:
-                    for phone in self.employee._owner_phones:
-                        await self.employee._send_whatsapp(phone, briefing)
-        except Exception as exc:
-            logger.error("scheduler.prospecting_error", error=str(exc))
+        logger.info("scheduler.jobs_registered", count=10)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -355,7 +307,7 @@ class SmartfieldScheduler:
         """
         يبحث عن أماكن تجارية حقيقية عبر Google Maps Places API،
         يصنّفها بـ Claude، ويرسل قائمة الموافقة للمالك.
-        يعمل 8:15 ص يومياً — بعد بدء Claude Prospecting بـ 15 دقيقة.
+        يعمل 8:15 ص يومياً.
         """
         logger.info("scheduler.running_google_maps_prospecting")
 

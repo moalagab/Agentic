@@ -16,13 +16,14 @@ Outscraper Prospecting Engine — محرك البحث الحقيقي
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
-import anthropic
 import httpx
 
 from models.lead import LeadCreate
@@ -144,42 +145,90 @@ def normalize_place(raw: dict) -> dict:
 # Claude — تصنيف + Caching + Semaphore
 # ===============================
 
-async def _classify_with_claude(place_info: str) -> dict:
-    """Claude — المحرك الأساسي مع Prompt Caching."""
-    client = anthropic.AsyncAnthropic()
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=500,
-        system=[{
-            "type": "text",
-            "text": SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{
-            "role": "user",
-            "content": f"صنف هذا العميل واكتب له رسالة:\n{place_info}",
-        }],
-    )
-    return json.loads(
-        response.content[0].text.strip()
-        .replace("```json", "").replace("```", "").strip()
-    )
+def _parse_gemini_json(text: str) -> dict:
+    """Extract JSON from Gemini response.
+
+    Handles: markdown code blocks, extra text before/after JSON,
+    Python-style single-quoted dicts.
+    """
+    # Strip markdown code blocks
+    text = text.strip().replace("```json", "").replace("```", "").strip()
+
+    # 1. Direct JSON parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # 2. Extract first {...} block via regex
+    match = re.search(r'\{[\s\S]*\}', text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except (json.JSONDecodeError, ValueError):
+            pass
+        # 3. Python literal_eval for single-quoted dicts
+        try:
+            result = ast.literal_eval(match.group())
+            if isinstance(result, dict):
+                return result
+        except (ValueError, SyntaxError):
+            pass
+
+    # 4. Try full text with literal_eval (single-quoted Python dict)
+    try:
+        result = ast.literal_eval(text)
+        if isinstance(result, dict):
+            return result
+    except (ValueError, SyntaxError):
+        pass
+
+    raise ValueError(f"Could not parse Gemini response as JSON. Preview: {text[:120]!r}")
 
 
-async def _classify_with_gemini(place_info: str, gemini_key: str) -> dict:
-    """Gemini — الاحتياطي عند توقف Claude."""
-    prompt = f"{SYSTEM_PROMPT}\n\nصنف هذا العميل واكتب له رسالة:\n{place_info}"
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
-            headers={"Content-Type": "application/json", "X-goog-api-key": gemini_key},
-            json={"contents": [{"parts": [{"text": prompt}]}]},
+async def _classify_with_gemini(place_info: str, gemini_key: str = "") -> dict:
+    """Gemini with thinking disabled — returns clean JSON directly.
+
+    Tries gemini-2.5-flash first; falls back to gemini-2.5-flash-lite on 503.
+    """
+    from google.genai import types as gt
+    from google.genai import errors as ge
+    from agent.ai_client import _gemini_client
+    import os
+
+    key = gemini_key or os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise ValueError("No Gemini API key available")
+
+    client = _gemini_client(key)
+    prompt = f"صنف هذا العميل واكتب له رسالة:\n{place_info}"
+
+    for model in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+        config = gt.GenerateContentConfig(
+            max_output_tokens=2048,
+            system_instruction=SYSTEM_PROMPT,
+            thinking_config=gt.ThinkingConfig(thinking_budget=0),
         )
-        response.raise_for_status()
-        text = response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(
-            text.strip().replace("```json", "").replace("```", "").strip()
-        )
+        try:
+            resp = await client.aio.models.generate_content(
+                model=model, contents=prompt, config=config,
+            )
+            text = resp.text.strip() if resp.text else ""
+            if not text:
+                raise ValueError("Empty response from Gemini")
+            return _parse_gemini_json(text)
+        except ge.ServerError as e:
+            if "503" in str(e) or "UNAVAILABLE" in str(e):
+                logger.warning(f"{model} overloaded, trying next model...")
+                continue
+            raise
+
+    raise RuntimeError("All Gemini models unavailable (503)")
+
+
+async def _classify_with_gemini_http(place_info: str, gemini_key: str) -> dict:
+    """Gemini HTTP fallback — not used (keeping for legacy)."""
+    raise NotImplementedError("Use _classify_with_gemini instead")
 
 
 async def classify_and_draft(
@@ -204,19 +253,16 @@ async def classify_and_draft(
             f"الموقع الإلكتروني: {place.get('website', 'غير متوفر')}\n"
         )
 
-        # ── المحاولة 1: Claude ────────────────────────────────────────────────
+        # ── المحاولة 1: Gemini (env key) ──────────────────────────────────────
         try:
-            result = await _classify_with_claude(place_info)
+            result = await _classify_with_gemini(place_info)
             result["place"] = place
-            result["_engine"] = "claude"
+            result["_engine"] = "gemini"
             return result
-        except json.JSONDecodeError as e:
-            logger.warning(f"Claude JSON parse error [{place.get('name')}]: {e}")
-            return None
         except Exception as e:
-            logger.warning(f"Claude failed [{place.get('name')}]: {e} — جاري تجربة Gemini...")
+            logger.warning(f"Gemini attempt 1 failed [{place.get('name')}]: {e}")
 
-        # ── المحاولة 2: Gemini (fallback) ─────────────────────────────────────
+        # ── المحاولة 2: Gemini (explicit key) ─────────────────────────────────
         if not gemini_key:
             logger.error(f"Gemini key غير مضبوط — تخطي [{place.get('name')}]")
             return None
@@ -226,11 +272,8 @@ async def classify_and_draft(
             result["_engine"] = "gemini"
             logger.info(f"✅ Gemini أكمل بنجاح [{place.get('name')}]")
             return result
-        except json.JSONDecodeError as e:
-            logger.warning(f"Gemini JSON parse error [{place.get('name')}]: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Gemini failed [{place.get('name')}]: {e}")
+            logger.error(f"Gemini attempt 2 failed [{place.get('name')}]: {e}")
             return None
 
 
@@ -334,13 +377,14 @@ async def run_prospecting_engine(
                 name=place.get("name", ""),
                 phone=place.get("formatted_phone_number", ""),
                 source="serpapi_prospecting",
-                category=result.get("category", "food_transport"),
+                category="food_transport",  # All prospecting leads are food businesses
                 score=result.get("score", 50),
                 priority=result.get("priority", "medium"),
                 raw_data={
                     "place": {k: v for k, v in place.items() if k != "_raw"},
                     "draft_message": result.get("message", ""),
                     "reason": result.get("reason", ""),
+                    "gemini_category": result.get("category", ""),  # original Arabic
                     "collected_at": datetime.now().isoformat(),
                 },
             )

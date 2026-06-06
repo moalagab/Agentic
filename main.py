@@ -8,10 +8,15 @@ Starts the FastAPI webhook server using uvicorn.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 
 import structlog
 import uvicorn
+from dotenv import load_dotenv
+
+# تحميل .env في os.environ قبل كل شيء (يضمن توفر المفاتيح لكل الوحدات)
+load_dotenv(override=False)
 
 from channels.webhook_server import app
 from config import get_settings

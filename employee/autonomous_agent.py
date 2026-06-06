@@ -17,8 +17,8 @@ import json
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-import anthropic
 import structlog
+from agent.ai_client import get_text, run_agentic_loop
 
 from agent.knowledge_base import get_kb_text, get_scoring_context
 from agent.prompts import SYSTEM_PROMPT_AR
@@ -48,8 +48,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
-CLAUDE_CONV_MODEL = "claude-sonnet-4-6"
+GEMINI_MODEL = "gemini-flash-latest"
 
 # ─── Employee system prompt ───────────────────────────────────────────────────
 
@@ -57,54 +56,92 @@ _KB_TEXT = get_kb_text()
 _SCORE_CTX = get_scoring_context()
 
 EMPLOYEE_SYSTEM_PROMPT = f"""\
-أنت مسؤول مبيعات في شركة سمارت فيلد للنقل المبرد — المملكة العربية السعودية.
-اسمك سمارت. تتحدث بثقة وإيجاز. لا تستخدم إيموجي في ردودك إلا نادراً وبحذر شديد.
+## هويتك
+اسمك **محمد**. أنت وكيل خدمة عملاء ذكي تمثّل شركة **Smart Field** للنقل المبرد في الرياض.
+شعار الشركة: "الدقة في كل درجة". ميزتنا الرئيسية: **تقرير حراري موثّق مع كل تسليم**.
+عند تعريف نفسك: "معك محمد من Smart Field" — لا تقل سمارت ولا سمارت فيلد.
 
 {_KB_TEXT}
 
 
 ## شخصيتك
-- سعودي الأسلوب، احترافي، مباشر
-- تعرف النقل المبرد من الداخل: سلسلة التبريد، درجات الحرارة، الشاحنات المبردة، اللوائح الغذائية
-- ثقيل بالخبرة، خفيف بالكلام — جملة أو جملتين تكفيان
-- لا تبالغ في الترحيب، لا تكرر نفسك، لا تقدم وعوداً فارغة
-- تتكلم مثل خبير، لا مثل برنامج
+- احترافي، ودود، مباشر
+- تتكيّف مع أسلوب العميل (رسمي أو عامّي)
+- ردودك قصيرة ومركّزة — جملتان إلى أربع كحد أقصى، بلا حشو
+- لا تكرر نفس الترحيب، ولا تكرر معلومة قلتها قبل
 
-## خبرتك التقنية (استخدمها عند الحاجة)
-- درجات تشغيل: مبرد -2 إلى +8 درجة، مجمد -18 إلى -25 درجة
-- أنواع البضائع: لحوم، دواجن، مأكولات بحرية، ألبان، خضار وفاكهة، أدوية ومستحضرات طبية
-- الاشتراطات: سيارة حافظة حرارة (جوازة الصحة)، HACCP، سلسلة التبريد المتكاملة
-- المسارات الرئيسية: الرياض، جدة، الدمام، المدينة، مكة، أبها، تبوك
-- التسعير: يعتمد على المسافة، نوع البضاعة، الوزن، ودرجة الحرارة المطلوبة
+## قاعدة الترحيب
+- الرسالة الأولى فقط: رحّب بإيجاز ثم أجب مباشرة
+- الرسائل التالية: بلا ترحيب — استمر في الموضوع مباشرة
 
-## معلومات الشركة
-سمارت فيلد — أسطول شاحنات مبردة بتقنية Thermo King، تغطية الرياض والمناطق الرئيسية، تتبع GPS، معتمدة ISO 22000.
+## خدماتنا
+- نقل مبرد B2B داخل الرياض — يبدأ من 160 ريال للرحلة
+- نخدم: المطاعم، المطابخ المركزية، محامص القهوة، المخابز، ورش الحلويات، الموردين الغذائيين، شركات التموين
+- ميزتنا الأساسية: تقرير حراري موثّق + استجابة طوارئ خلال 90 دقيقة + ضبط دقيق لدرجة حرارة كل منتج
 
-## قواعد الرد
+## مسارات الخدمة
 
-### عند التحية (أول رسالة أو رسالة تحية فقط):
-- إذا قال "السلام عليكم" → رد بـ"وعليكم السلام"
-- إذا قال "مرحبا" أو "هلا" أو "أهلاً" → رد بـ"هلا حياك الله" أو ما يناسب
-- بعد رد التحية: "نتشرف باسمك — كيف نقدر نخدمك؟"
-- جملتين فقط. لا تزيد.
+### إذا سأل عن السعر:
+1. اسأل: داخل الرياض أو خارجها؟ ونوع البضاعة ودرجة التبريد المطلوبة
+2. داخل الرياض: السعر يبدأ من 160 ريال، ويُحدَّد نهائيًا حسب المسافة والتكرار
+3. خارج الرياض: "نقيّم الرحلات خارج الرياض حسب توفّر الجدولة — خذ تفاصيلك وفريقنا يأكد لك الإمكانية والسعر خلال ساعات." (لا تلتزم بسعر أو بتنفيذ مؤكد)
+4. اربط السعر بالقيمة: "السعر يشمل تقرير حراري موثّق مع التسليم"
 
-### عند معرفة الاحتياج:
-- افهم السياق أولاً من كلامه، ثم رد عليه بشكل طبيعي
-- لا تسأل أسئلة جاهزة وجامدة — اسأل بناءً على ما قاله هو تحديداً
-- إذا ذكر نوع البضاعة → اسأل عن المسار أو الكمية أو التوقيت
-- إذا ذكر مسار → اسأل عن البضاعة ونوع التبريد
-- إذا سأل عن سعر → أعطه نطاقاً واقعياً بناءً على ما تعرفه، لا تهرب من الجواب
-- سؤال واحد في كل رسالة — لا استجواب
+### إذا أراد حجز رحلة:
+اجمع هذه البيانات (سؤال واحد أو سؤالان في كل رسالة، لا تستجوبه):
+- نوع المنشأة والمنتج
+- نقطة الانطلاق والوجهة
+- التاريخ والوقت المطلوب
+- درجة الحرارة المطلوبة
+ثم أكّد التفاصيل في رسالة واحدة، وأخبره أن الفريق سيتواصل لتثبيت الحجز.
 
-### متى تسجّل العميل:
-- عندما تجمع: الاسم + (نوع البضاعة أو المسار) — سجّله في الخلفية بدون إخبار العميل
+### إذا كان طلب طارئ (ثلاجة تعطّلت / شحنة بخطر):
+1. أبدِ الجدية فورًا: "وصلني، نتحرك بأسرع وقت"
+2. اطلب: الموقع، نوع البضاعة، درجة الحرارة المطلوبة
+3. أخبره: "نستجيب للطوارئ خلال 90 دقيقة داخل نطاقنا — الفريق يتواصل معك الحين"
 
-### مع صاحب العمل:
-- نفّذ الأمر مباشرة، أبلغ بالنتيجة بإيجاز
-- "تقرير اليوم" / "قائمة العملاء" / "إحصائيات" / "متابعة [اسم]" / "أرسل عرض لـ [اسم]"
+### إذا سأل سؤالًا عامًا عن الشركة:
+أجب بإيجاز ثم وجّهه لخطوة (حجز أو استفسار سعر)
 
-## حجم الرد
-جملة إلى ثلاث جمل. لا فقرات. لا قوائم نقطية في الغالب. لا ختام رسمي.
+### إذا اشتكى أو واجه مشكلة:
+1. تفهّم بجملة واحدة (بلا مبالغة)
+2. اطلب تفاصيل المشكلة
+3. أخبره أن الفريق سيتواصل خلال ساعتين
+
+### إذا اعترض على السعر:
+لا تجادل. قل: "النقل المبرد تأمين على بضاعتك — شحنة تتلف تكلّف أضعاف فرق السعر. والتقرير الحراري يحميك أمام أي مساءلة." ثم اعرض رحلة تجريبية.
+
+## التقفيل
+في نهاية أي محادثة مكتملة، رسالة واحدة:
+- تأكيد ما اتُّفق عليه
+- الخطوة التالية بوضوح
+- شكر مختصر
+
+## قواعد صارمة (لا تتجاوزها أبدًا)
+- لا تخترع أسعارًا أو أرقامًا أو قدرات غير مذكورة هنا. إذا لا تعرف، قل: "أتأكد لك من الفريق وأرد عليك"
+- لا تلتزم بسعر للرحلات خارج الرياض قبل أخذ التفاصيل وتأكيد الفريق
+- لا تدّعِ عملاء أو عددهم أو حجم الشركة. إذا سُئلت: "نختار عملاءنا الأوائل بعناية، ويسعدنا تكون منهم"
+- لا تقبل طلبات نقل أدوية أو لقاحات (خارج تخصصنا) — اعتذر ووجّهه لمختص
+- لا توصيل أفراد (B2C) — خدمتنا للمنشآت فقط
+- لا تتجاوز 3 رسائل قبل أن تصل لخطوة واضحة
+- إذا كان الطلب غير واضح، اسأل سؤالًا واحدًا فقط لتوضيحه
+- إذا خرج العميل عن نطاق خدمتنا أو طلب ما لا تقدر عليه، حوّله للفريق البشري بدل أن تخمّن
+- تحدّث بالعربية دائمًا ما لم يبدأ العميل بالإنجليزية
+- لا تستخدم رموزًا تعبيرية بإفراط — رمز واحد كل عدة رسائل يكفي
+
+## متى تسجّل العميل
+عندما تجمع: الاسم + (نوع البضاعة أو المسار أو نوع المنشأة) — سجّله في الخلفية بدون إخبار العميل.
+عند اكتمال أي حجز أو طلب جاد، لخّص داخلياً بهذا الشكل:
+[نوع المنشأة | المنتج | الانطلاق | الوجهة | التاريخ/الوقت | درجة الحرارة | داخل/خارج الرياض | طارئ: نعم/لا]
+
+## مع صاحب العمل
+نفّذ الأمر مباشرة، أبلغ بالنتيجة بإيجاز.
+
+## تذكير الهوية (مهم جداً)
+- اسمك **محمد** في كل الردود — لا "سمارت"، لا "Smart Field Bot"
+- الشركة: **Smart Field** (وليس سمارت فيلد باللاتيني بالعربية)
+- عند أول تعريف: "معك محمد من Smart Field"
+- السعر داخل الرياض يبدأ من 160 ريال — لا تذكر الأسعار الأعلى إلا إذا سأل خارج الرياض
 """
 
 OWNER_COMMAND_TOOLS = [
@@ -187,7 +224,6 @@ class AutonomousEmployee:
         self.crm = crm
         self.notifier = notifier
         self.telegram = telegram
-        self.client = anthropic.AsyncAnthropic(api_key=config.ANTHROPIC_API_KEY)
         self.cpq = CPQEngine()
         self._owner_phones: set[str] = set(
             p.strip() for p in (config.SALES_TEAM_WHATSAPP or [])
@@ -333,58 +369,26 @@ class AutonomousEmployee:
     async def _handle_owner_command(
         self, phone: str, message: str, history: list[dict]
     ) -> str:
-        """Process a command from the business owner using Claude with tools."""
-        messages = [
-            *history[:-1],  # previous turns (history already includes current)
-            {"role": "user", "content": message},
-        ]
+        """Process a command from the business owner using Gemini with tools."""
+        system = EMPLOYEE_SYSTEM_PROMPT + "\n\nأنت تتحدث الآن مع **صاحب العمل**."
 
-        response = await self.client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=1024,
-            system=[
-                {
-                    "type": "text",
-                    "text": EMPLOYEE_SYSTEM_PROMPT + "\n\nأنت تتحدث الآن مع **صاحب العمل**.",
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            tools=OWNER_COMMAND_TOOLS,
-            messages=messages,
-        )
+        async def _owner_tool_exec(name: str, inputs: dict) -> dict:
+            return await self._execute_owner_tool(name, inputs)
 
-        # Agentic loop for tool calls
-        while response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    result = await self._execute_owner_tool(block.name, block.input)
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    })
-
-            messages = [
-                *messages,
-                {"role": "assistant", "content": response.content},
-                {"role": "user", "content": tool_results},
-            ]
-            response = await self.client.messages.create(
-                model=CLAUDE_MODEL,
-                max_tokens=1024,
-                system=[
-                    {
-                        "type": "text",
-                        "text": EMPLOYEE_SYSTEM_PROMPT + "\n\nأنت تتحدث مع صاحب العمل.",
-                        "cache_control": {"type": "ephemeral"},
-                    }
-                ],
+        try:
+            result = await run_agentic_loop(
+                api_key=self.config.GEMINI_API_KEY,
+                system=system,
+                user_message=message,
                 tools=OWNER_COMMAND_TOOLS,
-                messages=messages,
+                tool_executor=_owner_tool_exec,
+                max_iterations=5,
+                model=GEMINI_MODEL,
             )
-
-        return self._extract_text(response)
+            return result["final_text"] or "تم تنفيذ الأمر."
+        except Exception as exc:
+            logger.error("employee.owner_command_failed", error=str(exc))
+            return "حدث خطأ أثناء التنفيذ. حاول مجدداً."
 
     async def _execute_owner_tool(self, name: str, inputs: dict) -> dict:
         """Execute a tool requested by Claude for owner commands."""
@@ -503,79 +507,46 @@ class AutonomousEmployee:
             },
         }
 
-        messages = [*history[:-1], {"role": "user", "content": message}]
-
-        system_blocks = [
-            {
-                "type": "text",
-                "text": EMPLOYEE_SYSTEM_PROMPT,
-                "cache_control": {"type": "ephemeral"},
-            },
-            {
-                "type": "text",
-                "text": ctx,
-            },
-        ]
-
-        response = await self.client.messages.create(
-            model=CLAUDE_CONV_MODEL,
-            max_tokens=300,
-            system=system_blocks,
-            tools=[extract_tool, quote_tool],
-            messages=messages,
-        )
-
-        # Handle tool calls
+        system = EMPLOYEE_SYSTEM_PROMPT + f"\n\n{ctx}"
         quote_result: str | None = None
-        if response.stop_reason == "tool_use":
-            tool_results = []
-            for block in response.content:
-                if block.type != "tool_use":
-                    continue
-                if block.name == "register_lead":
-                    asyncio.create_task(
-                        self._register_lead_from_chat(phone, block.input, profile)
-                    )
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": "تم تسجيل العميل.",
-                    })
-                elif block.name == "calculate_quote":
-                    try:
-                        q = self.cpq.calculate(
-                            route_from=block.input.get("route_from", ""),
-                            route_to=block.input.get("route_to", ""),
-                            vehicle_type=block.input.get("vehicle_type", "medium_truck"),
-                            temperature_zone=block.input.get("temperature_zone", "chilled"),
-                            frequency_per_month=int(block.input.get("frequency_per_month", 1)),
-                        )
-                        quote_result = q.quote_summary_ar
-                    except Exception as exc:
-                        logger.error("cpq.calculation_failed", error=str(exc))
-                        quote_result = "لم أتمكن من حساب السعر الآن."
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": quote_result or "",
-                    })
 
-            # Second call so Claude formats the quote naturally
-            if tool_results:
-                follow_up_messages = [
-                    *messages,
-                    {"role": "assistant", "content": response.content},
-                    {"role": "user", "content": tool_results},
-                ]
-                response = await self.client.messages.create(
-                    model=CLAUDE_CONV_MODEL,
-                    max_tokens=350,
-                    system=system_blocks,
-                    tools=[extract_tool, quote_tool],
-                    messages=follow_up_messages,
+        async def _conv_tool_exec(name: str, inputs: dict) -> dict:
+            nonlocal quote_result
+            if name == "register_lead":
+                asyncio.create_task(
+                    self._register_lead_from_chat(phone, inputs, profile)
                 )
+                return {"status": "تم تسجيل العميل."}
+            elif name == "calculate_quote":
+                try:
+                    q = self.cpq.calculate(
+                        route_from=inputs.get("route_from", ""),
+                        route_to=inputs.get("route_to", ""),
+                        vehicle_type=inputs.get("vehicle_type", "medium_truck"),
+                        temperature_zone=inputs.get("temperature_zone", "chilled"),
+                        frequency_per_month=int(inputs.get("frequency_per_month", 1)),
+                    )
+                    quote_result = q.quote_summary_ar
+                    return {"quote": quote_result}
+                except Exception as exc:
+                    logger.error("cpq.calculation_failed", error=str(exc))
+                    return {"quote": "لم أتمكن من حساب السعر الآن."}
+            return {"error": f"unknown tool: {name}"}
 
-        text_response = self._extract_text(response)
+        try:
+            loop_result = await run_agentic_loop(
+                api_key=self.config.GEMINI_API_KEY,
+                system=system,
+                user_message=message,
+                tools=[extract_tool, quote_tool],
+                tool_executor=_conv_tool_exec,
+                max_iterations=3,
+                model=GEMINI_MODEL,
+            )
+            text_response = loop_result["final_text"] or "كيف أقدر أساعدك؟"
+        except Exception as exc:
+            logger.error("employee.lead_conversation_failed", error=str(exc))
+            text_response = "تفضل، كيف أقدر أخدمك؟"
 
         # Update profile keywords from raw message (no extra API call)
         await self._update_profile_from_message(phone, message, profile, False)
@@ -634,7 +605,7 @@ class AutonomousEmployee:
                 "ردّ بجملة ترحيب واحدة قصيرة باسم الشركة، "
                 "ثم اسأل سؤالاً واحداً مفتوحاً: كيف تقدر تخدمه.\n"
                 "لا تسأل عن اسمه بعد — دعه يتكلم أولاً.\n"
-                "مثال على النبرة: 'السلام عليكم، معك سمارت من سمارت فيلد للنقل المبرد — كيف نقدر نخدمك؟'"
+                "مثال على النبرة: 'السلام عليكم، معك محمد من Smart Field للنقل المبرد — كيف نقدر نخدمك؟'"
             )
 
         if stage == STAGE_DISCOVERY:
@@ -838,7 +809,7 @@ class AutonomousEmployee:
         cargo_line = f" لنقل {cargo_type}" if cargo_type else ""
         return (
             f"السلام عليكم {lead_name}،\n\n"
-            f"سمارت فيلد{cargo_line} — أسطول شاحنات مبردة Thermo King، تغطية كاملة في المملكة، تتبع GPS، معتمدة ISO 22000.\n\n"
+            f"Smart Field{cargo_line} — نقل مبرد B2B داخل الرياض يبدأ من 160 ريال للرحلة، مع تقرير حراري موثّق مع كل تسليم.\n\n"
             f"متى يناسبكم مكالمة قصيرة نناقش فيها احتياجاتكم؟"
         )
 

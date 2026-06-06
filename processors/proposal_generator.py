@@ -88,20 +88,13 @@ async def generate_proposal_text(lead: dict, anthropic_key: str, revision_notes:
     يستخدم Claude لإنشاء عرض مخصص باللغة العربية.
     """
     try:
-        import anthropic
-        client = anthropic.AsyncAnthropic(api_key=anthropic_key)
-
-        message = await client.messages.create(
-            model="claude-sonnet-4-6",
+        from agent.ai_client import get_text
+        return await get_text(
+            anthropic_key,
+            "أنت كاتب عروض احترافي لشركة سمارت فيلد للنقل المبرد في السعودية. اكتب بالعربية فقط.",
+            _build_proposal_prompt(lead, revision_notes),
             max_tokens=2000,
-            system="أنت كاتب عروض احترافي لشركة سمارت فيلد للنقل المبرد في السعودية. اكتب بالعربية فقط.",
-            messages=[{"role": "user", "content": _build_proposal_prompt(lead, revision_notes)}],
         )
-        blocks = [b for b in message.content if hasattr(b, "text")]
-        if not blocks:
-            raise ValueError("Empty response from Claude")
-        return blocks[0].text
-
     except Exception as exc:
         logger.error("Proposal generation failed", error=str(exc))
         return _fallback_proposal(lead)

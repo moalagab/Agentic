@@ -117,6 +117,12 @@ async def get_dashboard_data(supabase_client: Any) -> dict:
         key=lambda x: x.get("score", 0), reverse=True
     )[:8]
 
+    # Today's outbound messages (leads contacted today)
+    today_messages = sorted(
+        [l for l in leads if l.get("status") == "contacted" and l.get("updated_at", l.get("created_at", "")) >= today],
+        key=lambda x: x.get("updated_at", x.get("created_at", "")), reverse=True
+    )[:20]
+
     return {
         "total": total, "today": today_leads, "week": week_leads, "month": month_leads,
         "qualified": qualified_count, "meetings": meeting_count,
@@ -127,8 +133,59 @@ async def get_dashboard_data(supabase_client: Any) -> dict:
         "by_stage": by_stage, "by_priority": by_priority, "by_source": by_source,
         "avg_response_min": avg_response, "sla_rate": sla_rate,
         "top_leads": top_leads,
+        "today_messages": today_messages,
         "generated_at": now.isoformat(),
     }
+
+
+def _render_today_messages(messages: list) -> str:
+    if not messages:
+        return ""
+    rows = ""
+    for i, l in enumerate(messages, 1):
+        name = l.get("name") or "—"
+        phone = l.get("phone") or "—"
+        score = l.get("score") or 0
+        msg = ""
+        raw = l.get("raw_data") or {}
+        if isinstance(raw, dict):
+            msg = raw.get("draft_message", "")[:80] or raw.get("message", "")[:80]
+        time_str = str(l.get("updated_at") or l.get("created_at") or "")
+        # Convert UTC to Arabia time (+3)
+        try:
+            from datetime import timezone, timedelta as td
+            dt = datetime.fromisoformat(time_str[:19])
+            dt_ar = dt + td(hours=3)
+            time_str = dt_ar.strftime("%H:%M")
+        except Exception:
+            time_str = time_str[11:16]
+        rows += f"""
+        <tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:8px 12px;font-size:13px;color:#64748b;width:40px">{i}</td>
+          <td style="padding:8px 12px;font-weight:500">{name}</td>
+          <td style="padding:8px 12px;color:#64748b;font-size:13px;direction:ltr">{phone}</td>
+          <td style="padding:8px 12px;text-align:center">
+            <span style="background:#3b82f6;color:white;padding:2px 8px;border-radius:10px;font-size:11px">{score}</span>
+          </td>
+          <td style="padding:8px 12px;font-size:12px;color:#475569;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{msg}</td>
+          <td style="padding:8px 12px;font-size:12px;color:#94a3b8;white-space:nowrap">{time_str}</td>
+        </tr>"""
+
+    return f"""
+  <div class="card" style="margin-top:0">
+    <h2>📨 رسائل واتساب المُرسلة اليوم ({len(messages)})</h2>
+    <table>
+      <thead><tr>
+        <th style="width:40px">#</th>
+        <th>اسم العميل</th>
+        <th>رقم الهاتف</th>
+        <th>Score</th>
+        <th>مقتطف الرسالة</th>
+        <th>الوقت</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>"""
 
 
 def render_dashboard_html(data: dict) -> str:
@@ -146,15 +203,16 @@ def render_dashboard_html(data: dict) -> str:
     conv_rate  = data["conversion_rate"]
     by_stage   = data["by_stage"]
     by_source  = data["by_source"]
-    top_leads  = data["top_leads"]
-    avg_resp   = data["avg_response_min"]
-    sla_rate   = data["sla_rate"]
-    gen_at     = data["generated_at"][:19].replace("T", " ")
+    top_leads       = data["top_leads"]
+    today_messages  = data.get("today_messages", [])
+    avg_resp        = data["avg_response_min"]
+    sla_rate        = data["sla_rate"]
+    gen_at          = data["generated_at"][:19].replace("T", " ")
 
     PRIORITY_COLOR = {"high": "#ef4444", "medium": "#f59e0b", "low": "#22c55e"}
     SOURCE_AR = {"website": "الموقع", "whatsapp": "واتساب", "ads": "إعلانات",
                  "linkedin": "LinkedIn", "manual": "يدوي", "google_forms": "نموذج",
-                 "telegram": "Telegram"}
+                 "telegram": "Telegram", "serpapi_prospecting": "خرائط جوجل"}
 
     # ── Pipeline Funnel ────────────────────────────────────────────────────────
     max_stage = max(by_stage.values(), default=1) or 1
@@ -345,6 +403,9 @@ def render_dashboard_html(data: dict) -> str:
       <tbody>{rows}</tbody>
     </table>
   </div>
+
+  <!-- Today's WhatsApp Messages -->
+  {_render_today_messages(today_messages)}
 
 </div>
 </body>

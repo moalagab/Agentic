@@ -18,6 +18,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 import structlog
+from agent.ai_client import get_text
 
 logger = structlog.get_logger(__name__)
 
@@ -37,8 +38,8 @@ class ContentEngine:
     يولّد محتوى هادفاً مرتبطاً بأهداف إيرادية محددة.
     """
 
-    def __init__(self, anthropic_api_key: str) -> None:
-        self.api_key = anthropic_api_key
+    def __init__(self, gemini_api_key: str) -> None:
+        self.api_key = gemini_api_key
         self._log = logger.bind(component="ContentEngine")
 
     # ─── LinkedIn Posts ───────────────────────────────────────────────────────
@@ -58,8 +59,6 @@ class ContentEngine:
           - stats: industry statistics
           - cold_chain: cold chain education
         """
-        import anthropic
-
         prompts = {
             "insight": self._linkedin_insight_prompt(data),
             "win": self._linkedin_win_prompt(data),
@@ -70,15 +69,7 @@ class ContentEngine:
 
         prompt = prompts.get(content_type, prompts["insight"])
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=600,
-            system=CONTENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        post = response.content[0].text.strip()
+        post = await get_text(self.api_key, CONTENT_SYSTEM_PROMPT, prompt, max_tokens=600)
         self._log.info("content.linkedin_generated", type=content_type, length=len(post))
         return post
 
@@ -144,8 +135,6 @@ class ContentEngine:
         sequence_step: int = 1,
     ) -> dict[str, str]:
         """Generate a single email in a drip sequence (3-step)."""
-        import anthropic
-
         step_prompts = {
             1: f"""اكتب بريد إلكتروني أول تواصل (Cold Email) لـ:
 الاسم: {lead_name}
@@ -188,15 +177,7 @@ BODY:
 
         prompt = step_prompts.get(sequence_step, step_prompts[1])
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=400,
-            system=CONTENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        text = response.content[0].text.strip()
+        text = await get_text(self.api_key, CONTENT_SYSTEM_PROMPT, prompt, max_tokens=400)
 
         # Parse subject and body
         subject = ""
@@ -219,8 +200,6 @@ BODY:
         last_context: Optional[str] = None,
     ) -> str:
         """Generate a personalized WhatsApp reactivation message."""
-        import anthropic
-
         context_text = f"آخر محادثة: {last_context}" if last_context else ""
 
         prompt = f"""اكتب رسالة واتساب قصيرة لإعادة تفعيل محادثة مع:
@@ -232,22 +211,12 @@ BODY:
 الطول: 2-3 جمل فقط.
 لا تبدأ بـ "مرحباً" مجردة — كن مباشراً."""
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=150,
-            system=CONTENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        return response.content[0].text.strip()
+        return await get_text(self.api_key, CONTENT_SYSTEM_PROMPT, prompt, max_tokens=150)
 
     # ─── Objection Handling Scripts ───────────────────────────────────────────
 
     async def generate_objection_script(self, objection: str) -> dict[str, str]:
         """Generate a sales script for handling a specific objection."""
-        import anthropic
-
         prompt = f"""اكتب سكريبت رد احترافي على الاعتراض التالي في محادثة مبيعات:
 "{objection}"
 
@@ -261,15 +230,7 @@ ACKNOWLEDGE: [جملة الاعتراف]
 REFRAME: [إعادة التأطير مع الأرقام]
 QUESTION: [السؤال الختامي]"""
 
-        client = anthropic.AsyncAnthropic(api_key=self.api_key)
-        response = await client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=300,
-            system=CONTENT_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
-
-        text = response.content[0].text.strip()
+        text = await get_text(self.api_key, CONTENT_SYSTEM_PROMPT, prompt, max_tokens=300)
         result = {"objection": objection, "full_script": text}
 
         for key in ["ACKNOWLEDGE", "REFRAME", "QUESTION"]:

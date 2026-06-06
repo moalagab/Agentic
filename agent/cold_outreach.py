@@ -95,9 +95,9 @@ def build_followup(stage: int, config: dict | None = None) -> str:
 
 def build_outreach_for_prospect(prospect: dict, segment_id: str) -> str:
     """
-    Convenience wrapper used by ProspectingEngine.
-    prospect — raw prospect dict from Claude (has 'company', 'city', etc.)
-    segment_id — PROSPECT_SEGMENTS id (e.g. 'catering_companies')
+    Convenience wrapper for building outreach messages.
+    prospect — raw prospect dict (has 'company', 'city', etc.)
+    segment_id — segment id (e.g. 'catering_companies')
     """
     company_name = prospect.get("company", "")
     return build_outreach(company_name, segment_id)
@@ -116,8 +116,6 @@ async def generate_claude_message(
 
     Returns a ready-to-send Arabic WhatsApp message (under 250 chars).
     """
-    import anthropic
-
     company   = prospect.get("company", "الشركة")
     city      = prospect.get("city", "المملكة")
     activity  = prospect.get("activity", segment_id)
@@ -157,14 +155,11 @@ async def generate_claude_message(
 4. تنتهي بسؤال مفتوح أو دعوة للتواصل
 أعطِ الرسالة فقط بدون أي شرح."""
 
-    client = anthropic.AsyncAnthropic(api_key=anthropic_api_key)
-    response = await client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=300,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    blocks = [b for b in response.content if hasattr(b, "text")]
-    return blocks[0].text.strip() if blocks else build_outreach_for_prospect(prospect, segment_id)
+    from agent.ai_client import get_text
+    try:
+        return await get_text(anthropic_api_key, "", prompt, max_tokens=300)
+    except Exception:
+        return build_outreach_for_prospect(prospect, segment_id)
 
 
 # ─── CLI / Example ────────────────────────────────────────────────────────────
