@@ -31,6 +31,8 @@ if TYPE_CHECKING:
     from processors.learning_loop import LearningLoop
     from processors.content_engine import ContentEngine
     from processors.outbound_sender import OutboundSender
+    from processors.followup_engine import CreativeFollowupEngine
+    from processors.contract_converter import ContractConverter
 
 logger = structlog.get_logger(__name__)
 
@@ -56,6 +58,8 @@ class SmartfieldScheduler:
         learning_loop: "Optional[LearningLoop]" = None,
         content_engine: "Optional[ContentEngine]" = None,
         outbound_sender: "Optional[OutboundSender]" = None,
+        creative_followup_engine: "Optional[CreativeFollowupEngine]" = None,
+        contract_converter: "Optional[ContractConverter]" = None,
     ):
         self.employee = employee
         self.pipeline = pipeline
@@ -64,6 +68,8 @@ class SmartfieldScheduler:
         self.learning_loop = learning_loop
         self.content_engine = content_engine
         self.outbound_sender = outbound_sender
+        self.creative_followup_engine = creative_followup_engine
+        self.contract_converter = contract_converter
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -199,7 +205,17 @@ class SmartfieldScheduler:
         #     misfire_grace_time=600,
         # )
 
-        logger.info("scheduler.jobs_registered", count=10)
+        # Contract converter — every day at 10:15 AM
+        self.scheduler.add_job(
+            self._run_contract_converter,
+            CronTrigger(hour=10, minute=15, timezone=RIYADH_TZ),
+            id="contract_converter",
+            name="محوّل العقود الشهرية",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+
+        logger.info("scheduler.jobs_registered", count=11)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -252,6 +268,14 @@ class SmartfieldScheduler:
                 logger.info("scheduler.follow_ups_completed", count=count)
         except Exception as exc:
             logger.error("scheduler.follow_up_error", error=str(exc))
+
+        # Creative follow-up sequences (FIX-005)
+        if self.creative_followup_engine:
+            try:
+                results = await self.creative_followup_engine.run_creative_sequence()
+                logger.info("scheduler.creative_followup_complete", **results)
+            except Exception as exc:
+                logger.error("scheduler.creative_followup_error", error=str(exc))
 
     async def _run_eod_summary(self):
         """Send a brief end-of-day summary to owners."""
@@ -484,6 +508,18 @@ class SmartfieldScheduler:
                 pass
         except Exception as exc:
             logger.error("scheduler.content_plan_error", error=str(exc))
+
+    async def _run_contract_converter(self):
+        """Run contract converter daily check (NEW-002)."""
+        logger.info("scheduler.running_contract_converter")
+        if not self.contract_converter:
+            logger.debug("scheduler.contract_converter_skipped", reason="not initialized")
+            return
+        try:
+            results = await self.contract_converter.check_and_offer_contracts()
+            logger.info("scheduler.contract_converter_complete", **results)
+        except Exception as exc:
+            logger.error("scheduler.contract_converter_error", error=str(exc))
 
     async def _startup_content_check(self):
         """

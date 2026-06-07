@@ -20,10 +20,16 @@ logger = structlog.get_logger(__name__)
 
 # ── Escalation Detection ───────────────────────────────────────────────────────
 
+# سؤال عن السعر — يرد تلقائياً ويُشعر المالك (بدون قفل الـ thread)
+_PRICE_KEYWORDS = [
+    "كم السعر", "كم التكلفة", "وش الأسعار", "بكم",
+    "كم الاشتراك", "كم الرحلة", "كم تكلفة",
+]
+
+# جاهز للإغلاق — ينتظر تدخّل المالك ويقفل الـ thread
 _BUYING_SIGNAL_KEYWORDS = [
-    "كم السعر", "كم التكلفة", "متى تقدر", "نبي نجرب",
-    "نبغى نبدأ", "وش الأسعار", "نحتاج توصيل",
-    "ابي اتواصل", "نقدر نتفق",
+    "نبي نجرب", "نبغى نبدأ", "نحتاج توصيل",
+    "ابي اتواصل", "نقدر نتفق", "متى تقدر", "وقت مناسب",
 ]
 
 _COMPLAINT_KEYWORDS = [
@@ -31,13 +37,26 @@ _COMPLAINT_KEYWORDS = [
     "مو زين", "للأسف", "مستاء", "مو راضي", "رفع شكوى",
 ]
 
+# الرد التلقائي على سؤال السعر
+PRICE_AUTO_REPLY = (
+    "أسعارنا تبدأ من 160 SAR للرحلة داخل الرياض — "
+    "التفاصيل تعتمد على نوع البضاعة والمسار. "
+    "فريقنا سيتواصل معك خلال دقائق لتحديد الأنسب لك. 🌡️"
+)
+
 
 def detect_escalation(text: str) -> Optional[str]:
     """
-    Returns 'buying_signal', 'complaint', or None.
-    Called on every inbound WhatsApp message before auto-reply.
+    Returns 'price_inquiry', 'buying_signal', 'complaint', or None.
+
+    price_inquiry  → auto-reply with price + notify owner (no thread lock)
+    buying_signal  → ack customer + notify owner + lock thread
+    complaint      → ack customer + notify owner + lock thread
     """
     t = text.lower()
+    for kw in _PRICE_KEYWORDS:
+        if kw in t:
+            return "price_inquiry"
     for kw in _BUYING_SIGNAL_KEYWORDS:
         if kw in t:
             return "buying_signal"
@@ -55,6 +74,14 @@ def build_escalation_telegram_message(
 ) -> str:
     """Format the Telegram alert sent to the owner on escalation."""
     preview = last_message[:200].replace("_", " ").replace("*", "")
+    if escalation_type == "price_inquiry":
+        return (
+            f"💰 *سؤال عن السعر*\n"
+            f"الاسم: {name}\n"
+            f"الرسالة: _{preview}_\n"
+            f"الهاتف: `{phone}`\n\n"
+            f"تم الرد التلقائي — تابع الآن ✅"
+        )
     if escalation_type == "buying_signal":
         return (
             f"🟢 *عميل جاهز للإغلاق*\n"

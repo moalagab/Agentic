@@ -38,7 +38,7 @@ from channels.google_forms import GoogleFormsHandler
 from channels.linkedin import LinkedInChannelHandler
 from channels.telegram import TelegramHandler
 from channels.website import WebsiteChannelHandler
-from channels.whatsapp import WhatsAppChannelHandler
+from channels.whatsapp import WhatsAppChannelHandler, PRICE_AUTO_REPLY
 from config import Settings, get_settings
 from employee.autonomous_agent import AutonomousEmployee
 from employee.memory import init_db
@@ -46,7 +46,8 @@ from employee.scheduler import SmartfieldScheduler
 from models.lead import LeadCreate, LeadSource, ProcessedLead
 from notifications.whatsapp import WhatsAppNotifier
 from processors.pipeline import LeadPipeline, create_pipeline_from_config
-from processors.followup_engine import FollowUpEngine
+from processors.followup_engine import FollowUpEngine, CreativeFollowupEngine
+from processors.contract_converter import ContractConverter
 from processors.proposal_generator import create_and_save_proposal, generate_proposal_text
 from processors.meeting_booking import MeetingBookingManager
 from processors.sla_monitor import SLAMonitor
@@ -79,6 +80,8 @@ _content_engine: Optional[ContentEngine] = None
 _cs_engine: Optional[CustomerSuccessEngine] = None
 _learning_loop: Optional[LearningLoop] = None
 _outbound_sender: Optional[OutboundSender] = None
+_creative_followup: Optional[CreativeFollowupEngine] = None
+_contract_converter: Optional[ContractConverter] = None
 
 # Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
 _processed_wa_ids: OrderedDict[str, None] = OrderedDict()
@@ -97,7 +100,7 @@ _THREAD_LOCK_TTL_S = 7200  # 2 hours
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop, _outbound_sender
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop, _outbound_sender, _creative_followup, _contract_converter
 
     settings = get_settings()
 
@@ -186,7 +189,20 @@ async def lifespan(app: FastAPI):
                 owner_chat_ids=[str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])],
                 daily_cap=10,
             )
-            log.info("Customer Success + Learning Loop + Outbound Sender initialized")
+            _owner_ids = [str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])]
+            _creative_followup = CreativeFollowupEngine(
+                crm=_pipeline.primary_crm,
+                notifier=_wa_notifier,
+                telegram=_tg_handler,
+                owner_chat_ids=_owner_ids,
+            )
+            _contract_converter = ContractConverter(
+                crm=_pipeline.primary_crm,
+                notifier=_wa_notifier,
+                telegram=_tg_handler,
+                owner_chat_ids=_owner_ids,
+            )
+            log.info("Customer Success + Learning Loop + Outbound Sender + Creative Followup + Contract Converter initialized")
         except Exception as exc:
             log.warning("RevOS v6 engines init partial", error=str(exc))
 
@@ -199,6 +215,8 @@ async def lifespan(app: FastAPI):
         learning_loop=_learning_loop,
         content_engine=_content_engine,
         outbound_sender=_outbound_sender,
+        creative_followup_engine=_creative_followup,
+        contract_converter=_contract_converter,
     )
     _scheduler.start()
 
@@ -1060,34 +1078,41 @@ async def _handle_whatsapp_conversation(
         escalation_type = detect_escalation(text)
 
         if escalation_type:
-            # a) Acknowledge customer immediately
+            owner_ids = getattr(get_settings(), "TELEGRAM_OWNER_CHAT_IDS", []) or []
+            tg_msg = build_escalation_telegram_message(
+                escalation_type=escalation_type,
+                name=name, phone=phone, last_message=text,
+            )
+
+            if escalation_type == "price_inquiry":
+                # Auto-reply with price template, notify owner — NO thread lock
+                if _wa_notifier:
+                    await _wa_notifier.send_custom_message(reply_to, PRICE_AUTO_REPLY)
+                if _tg_handler:
+                    for oid in owner_ids:
+                        try:
+                            await _tg_handler.send_message(str(oid), tg_msg)
+                        except Exception:
+                            pass
+                logger.info("wa.price_auto_replied", phone=phone)
+                await _auto_track_stage(phone=phone, message=text, role="lead")
+                return
+
+            # buying_signal / complaint — ack + notify + lock thread
             if _wa_notifier:
                 await _wa_notifier.send_custom_message(
-                    reply_to,
-                    "شكراً — سيتواصل معك فريقنا خلال دقائق",
+                    reply_to, "شكراً — سيتواصل معك فريقنا خلال دقائق",
                 )
-
-            # b) Alert owner on Telegram
             if _tg_handler:
-                owner_ids = getattr(get_settings(), "TELEGRAM_OWNER_CHAT_IDS", []) or []
-                tg_msg = build_escalation_telegram_message(
-                    escalation_type=escalation_type,
-                    name=name,
-                    phone=phone,
-                    last_message=text,
-                )
                 for oid in owner_ids:
                     try:
                         await _tg_handler.send_message(str(oid), tg_msg)
                     except Exception:
                         pass
 
-            # c) Lock thread for 2 hours
             import time as _t
             _escalated_threads[phone] = _t.time() + _THREAD_LOCK_TTL_S
             logger.info("wa.thread_escalated", phone=phone, type=escalation_type)
-
-            # Still track stage (message content matters)
             await _auto_track_stage(phone=phone, message=text, role="lead")
             return
 
@@ -1237,6 +1262,36 @@ async def _handle_telegram_callback(cq: dict):
             approved = data.startswith("outbound_approve:")
             lead_id  = data.split(":", 1)[1]
             status_msg = await _outbound_sender.handle_approval(lead_id, approved)
+            await _tg_handler.answer_callback_query(callback_id, status_msg[:200])
+            await _tg_handler.send_message(chat_id, status_msg)
+            return
+
+        # Creative follow-up: followup_approve:{lead_id}:{attempt} / followup_reject:{lead_id}
+        if data.startswith("followup_approve:") or data.startswith("followup_reject:"):
+            if not _creative_followup:
+                await _tg_handler.answer_callback_query(callback_id, "⚠️ النظام غير جاهز")
+                return
+            approved = data.startswith("followup_approve:")
+            if approved:
+                parts = data.split(":")  # ["followup_approve", lead_id, attempt]
+                lead_id = parts[1] if len(parts) > 1 else ""
+                attempt = int(parts[2]) if len(parts) > 2 else 0
+            else:
+                lead_id = data.split(":", 1)[1]
+                attempt = 0
+            status_msg = await _creative_followup.handle_approval(lead_id, attempt, approved)
+            await _tg_handler.answer_callback_query(callback_id, status_msg[:200])
+            await _tg_handler.send_message(chat_id, status_msg)
+            return
+
+        # Contract converter: outbound_contract_approve:{lead_id} / outbound_contract_reject:{lead_id}
+        if data.startswith("outbound_contract_approve:") or data.startswith("outbound_contract_reject:"):
+            if not _contract_converter:
+                await _tg_handler.answer_callback_query(callback_id, "⚠️ النظام غير جاهز")
+                return
+            approved = data.startswith("outbound_contract_approve:")
+            lead_id = data.split(":", 1)[1]
+            status_msg = await _contract_converter.handle_approval(lead_id, approved)
             await _tg_handler.answer_callback_query(callback_id, status_msg[:200])
             await _tg_handler.send_message(chat_id, status_msg)
             return
