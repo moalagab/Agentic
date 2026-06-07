@@ -14,12 +14,14 @@ Uses APScheduler for recurring tasks:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 if TYPE_CHECKING:
     from employee.autonomous_agent import AutonomousEmployee
@@ -34,6 +36,9 @@ logger = structlog.get_logger(__name__)
 
 # Riyadh timezone (UTC+3)
 RIYADH_TZ = "Asia/Riyadh"
+
+# Tracks last successful content generation run (persists across service restarts)
+_CONTENT_FLAG_FILE = Path(__file__).parent.parent / "data" / "sf_content_last_run"
 
 
 class SmartfieldScheduler:
@@ -154,6 +159,14 @@ class SmartfieldScheduler:
             name="خطة المحتوى الأسبوعية",
             replace_existing=True,
             misfire_grace_time=600,
+        )
+
+        # Startup check — runs once 60s after boot; triggers content engine if >7 days since last run
+        self.scheduler.add_job(
+            self._startup_content_check,
+            DateTrigger(run_date=datetime.now() + timedelta(seconds=60)),
+            id="startup_content_check",
+            name="فحص محتوى عند الإقلاع",
         )
 
         # Outbound sending — every day at 9:30 AM (after morning prospecting)
@@ -463,5 +476,38 @@ class SmartfieldScheduler:
                     await self.employee._send_whatsapp(phone, msg)
 
             logger.info("scheduler.content_plan_complete", total_pieces=total, buffer_uploads=uploaded)
+            # Write timestamp so startup check knows when we last ran
+            try:
+                _CONTENT_FLAG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                _CONTENT_FLAG_FILE.write_text(str(datetime.now().timestamp()))
+            except Exception:
+                pass
         except Exception as exc:
             logger.error("scheduler.content_plan_error", error=str(exc))
+
+    async def _startup_content_check(self):
+        """
+        Runs once 60 seconds after startup.
+        Triggers content plan immediately if last run was >7 days ago or never ran.
+        """
+        logger.info("scheduler.startup_content_check")
+        if not self.content_engine:
+            return
+
+        should_run = True
+        try:
+            if _CONTENT_FLAG_FILE.exists():
+                last_ts = float(_CONTENT_FLAG_FILE.read_text().strip())
+                days_since = (datetime.now().timestamp() - last_ts) / 86400
+                if days_since < 7:
+                    should_run = False
+                    logger.info(
+                        "scheduler.startup_content_skip",
+                        days_since_last_run=round(days_since, 1),
+                    )
+        except Exception:
+            pass  # corrupt flag file → run anyway
+
+        if should_run:
+            logger.info("scheduler.startup_content_running", reason="no run in last 7 days")
+            await self._run_content_plan()
