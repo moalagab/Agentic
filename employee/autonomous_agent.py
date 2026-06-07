@@ -22,6 +22,7 @@ from agent.ai_client import get_text, run_agentic_loop
 
 from agent.knowledge_base import get_kb_text, get_scoring_context
 from agent.prompts import SYSTEM_PROMPT_AR
+from pathlib import Path as _Path
 from employee import memory as mem
 from employee.report_generator import (
     build_daily_report,
@@ -54,6 +55,17 @@ GEMINI_MODEL = "gemini-flash-latest"
 
 _KB_TEXT = get_kb_text()
 _SCORE_CTX = get_scoring_context()
+
+
+def _load_brand_guidelines() -> str:
+    brand_file = _Path(__file__).parent.parent / "knowledge" / "smart_field_brand_guidelines.md"
+    try:
+        return brand_file.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+_BRAND_GUIDELINES = _load_brand_guidelines()
 
 EMPLOYEE_SYSTEM_PROMPT = f"""\
 ## هويتك
@@ -142,6 +154,11 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 - الشركة: **Smart Field** (وليس سمارت فيلد باللاتيني بالعربية)
 - عند أول تعريف: "معك محمد من Smart Field"
 - السعر داخل الرياض يبدأ من 160 ريال — لا تذكر الأسعار الأعلى إلا إذا سأل خارج الرياض
+
+━━━━━━━━━━━━━━━━━━━━
+BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
+{_BRAND_GUIDELINES}
+━━━━━━━━━━━━━━━━━━━━
 """
 
 OWNER_COMMAND_TOOLS = [

@@ -11,6 +11,37 @@ import json
 from pathlib import Path
 from typing import Optional
 
+_KNOWLEDGE_DIR = Path(__file__).parent.parent / "knowledge"
+
+
+def _load_brand_guidelines() -> str:
+    brand_file = _KNOWLEDGE_DIR / "smart_field_brand_guidelines.md"
+    try:
+        return brand_file.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+_BRAND_GUIDELINES = _load_brand_guidelines()
+
+_OUTREACH_SYSTEM_PROMPT = f"""\
+أنت خبير مبيعات B2B متخصص في قطاع النقل المبرد في المملكة العربية السعودية.
+تكتب رسائل واتساب outreach لشركة Smart Field للنقل المبرد في الرياض.
+
+━━━━━━━━━━━━━━━━━━━━
+BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
+{_BRAND_GUIDELINES}
+━━━━━━━━━━━━━━━━━━━━
+
+قواعد إضافية للـ Outbound WhatsApp:
+- الرسالة 3-5 أسطر فقط — لا أكثر
+- تتكلم عن مشكلة العميل لا عن الشركة
+- رقم واحد محدد كـ hook (مثل: درجة واحدة، 90 دقيقة، 160 ريال)
+- CTA واضح وبسيط في النهاية
+- لا ادعاءات بدون دليل تشغيلي
+- لا B2C — للمنشآت التجارية فقط
+"""
+
 CONFIG_PATH = Path(__file__).parent.parent / "smartfield_cold_outreach.json"
 
 # Segment ID mapping: prospecting engine segment IDs → outreach segment keys
@@ -157,7 +188,7 @@ async def generate_claude_message(
 
     from agent.ai_client import get_text
     try:
-        return await get_text(anthropic_api_key, "", prompt, max_tokens=300)
+        return await get_text(anthropic_api_key, _OUTREACH_SYSTEM_PROMPT, prompt, max_tokens=300)
     except Exception:
         return build_outreach_for_prospect(prospect, segment_id)
 
