@@ -119,6 +119,14 @@ class Settings(BaseSettings):
     APP_PORT: int = Field(default=8000, description="Server bind port")
     LOG_LEVEL: str = Field(default="INFO", description="Logging level: DEBUG, INFO, WARNING, ERROR")
 
+    # ─── Buffer (social media scheduling) ────────────────────────────────────
+    BUFFER_ACCESS_TOKEN: str = Field(default="", description="Buffer access token — buffer.com")
+    BUFFER_X_CHANNEL_ID: str = Field(default="", description="Buffer channel ID for X/Twitter")
+    BUFFER_INSTAGRAM_CHANNEL_ID: str = Field(default="", description="Buffer channel ID for Instagram")
+
+    # ─── X (Twitter) API ─────────────────────────────────────────────────────
+    X_BEARER_TOKEN: str = Field(default="", description="X API v2 Bearer Token — for trending topics")
+
     # ─── Optional: Meta Ads webhook secret ───────────────────────────────────
     META_ADS_VERIFY_TOKEN: str = Field(
         default="smartfield_meta_2024",
@@ -185,6 +193,12 @@ class Settings(BaseSettings):
 
     def is_whatsapp_configured(self) -> bool:
         return bool(self.WHATSAPP_BUSINESS_TOKEN and self.WHATSAPP_PHONE_ID)
+
+    def is_buffer_configured(self) -> bool:
+        return bool(self.BUFFER_ACCESS_TOKEN and (self.BUFFER_X_CHANNEL_ID or self.BUFFER_INSTAGRAM_CHANNEL_ID))
+
+    def is_x_configured(self) -> bool:
+        return bool(self.X_BEARER_TOKEN)
 
     def is_telegram_configured(self) -> bool:
         """True if bot token exists — enough to receive and respond to messages."""

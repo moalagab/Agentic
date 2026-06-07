@@ -1,18 +1,20 @@
 """
-Outbound Sender — محرك إرسال الـ Outreach
+Outbound Sender — محرك إرسال الـ Outreach بنظام الموافقة
 Layer 2 of RevOS v6
 
-يقرأ من leads (source='serpapi_prospecting', status='new', phone موجود)
-يستخدم draft_message المحفوظ من google_maps_engine مباشرةً
-يرسل عبر WAHA
-يحدّث الحالة إلى 'contacted'
+التدفق:
+1. 9:30 ص — يجلب العملاء المعلّقين ويرسل كارت موافقة لكل عميل عبر Telegram
+2. المالك يضغط ✅ موافق / ❌ رفض على كل كارت
+3. عند الموافقة → يُرسل WhatsApp فوراً (حتى الحد اليومي 10 رسائل)
+4. approval_status: PENDING → BATCH_SENT → APPROVED/REJECTED → SENT
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from typing import TYPE_CHECKING
+import json
+from datetime import datetime, date
+from typing import TYPE_CHECKING, Optional
 
 import structlog
 
@@ -21,14 +23,17 @@ from agent.cold_outreach import build_outreach_for_prospect
 if TYPE_CHECKING:
     from crm.supabase_crm import SupabaseCRM
     from notifications.whatsapp import WhatsAppNotifier
+    from channels.telegram import TelegramHandler
 
 logger = structlog.get_logger(__name__)
+
+_APPROVAL_STATUSES = ("PENDING", "BATCH_SENT", "APPROVED", "REJECTED", "SENT")
 
 
 class OutboundSender:
     """
-    Reads serpapi prospects from the leads table and sends personalized
-    WhatsApp messages via WAHA. Updates status to contacted after sending.
+    Sends personalized WhatsApp outreach only after owner approval via Telegram.
+    Daily cap: 10 messages. Approval gate prevents unsupervised outreach.
     """
 
     def __init__(
@@ -36,110 +41,252 @@ class OutboundSender:
         crm: "SupabaseCRM",
         notifier: "WhatsAppNotifier",
         anthropic_api_key: str,
-        daily_limit: int = 30,
+        telegram: Optional["TelegramHandler"] = None,
+        owner_chat_ids: Optional[list[str]] = None,
+        daily_cap: int = 10,
     ) -> None:
         self.crm = crm
         self.notifier = notifier
         self.api_key = anthropic_api_key
-        self.daily_limit = daily_limit
+        self.telegram = telegram
+        self.owner_chat_ids = owner_chat_ids or []
+        self.daily_cap = daily_cap
         self._log = logger.bind(component="OutboundSender")
 
-    async def send_pending_outreach(self) -> dict:
+    # ── Main daily job (called at 9:30 AM) ────────────────────────────────────
+
+    async def send_daily_approval_batch(self) -> dict:
         """
-        Main entry point — called daily after morning prospecting.
-        Sends to leads where source='serpapi_prospecting', phone is set, status='new'.
+        Fetch pending leads and send approval cards to Telegram.
+        Called by scheduler at 9:30 AM.
         """
-        results = {
-            "sent": 0,
-            "skipped_no_phone": 0,
-            "failed": 0,
-            "errors": [],
-            "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        if not self.telegram or not self.owner_chat_ids:
+            self._log.warning("outbound.no_telegram_configured")
+            return {"status": "no_telegram", "sent_to_telegram": 0}
+
+        today_sent = await self._count_today_sent()
+        remaining = max(0, self.daily_cap - today_sent)
+
+        if remaining == 0:
+            self._log.info("outbound.daily_cap_reached", cap=self.daily_cap)
+            return {"status": "cap_reached", "sent_today": today_sent, "cap": self.daily_cap}
+
+        leads = await self._fetch_pending(limit=remaining)
+        if not leads:
+            self._log.info("outbound.no_pending_leads")
+            return {"status": "no_pending", "sent_to_telegram": 0}
+
+        self._log.info("outbound.batch_start", total=len(leads))
+
+        # Header message
+        header = (
+            f"📋 *قائمة الإرسال اليومية — Smart Field*\n"
+            f"{len(leads)} عميل في انتظار موافقتك\n"
+            f"الحد اليومي: {today_sent}/{self.daily_cap} مُرسَل\n"
+            f"━━━━━━━━━━━━━━━━━━"
+        )
+        await self._notify_owner(header)
+
+        sent_count = 0
+        for lead in leads:
+            ok = await self._send_approval_card(lead)
+            if ok:
+                await self._update_approval_status(lead["id"], "BATCH_SENT")
+                sent_count += 1
+            await asyncio.sleep(0.5)  # avoid Telegram rate limiting
+
+        footer = "_الإرسال يبدأ بعد موافقتك على كل عميل_"
+        await self._notify_owner(footer)
+
+        self._log.info("outbound.batch_complete", sent_to_telegram=sent_count)
+        return {"status": "batch_sent", "sent_to_telegram": sent_count}
+
+    # ── Telegram approval card ─────────────────────────────────────────────────
+
+    async def _send_approval_card(self, lead: dict) -> bool:
+        """Send one lead as a Telegram card with ✅/❌ inline buttons."""
+        raw = lead.get("raw_data") or {}
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+
+        name     = lead.get("name", "غير معروف")
+        phone    = lead.get("phone", "—")
+        score    = lead.get("score", 0)
+        icp      = lead.get("icp_segment") or "—"
+        category = raw.get("gemini_category") or lead.get("category", "—")
+        draft    = (raw.get("draft_message") or "").strip()[:280]
+
+        text = (
+            f"🏢 *{name}*\n"
+            f"التصنيف: {category}  |  ICP: {icp}  |  Score: {score}/100\n"
+            f"الهاتف: `{phone}`\n\n"
+            f"_الرسالة المقترحة:_\n{draft}"
+        )
+
+        keyboard = {
+            "inline_keyboard": [[
+                {"text": "✅ موافق — أرسل", "callback_data": f"outbound_approve:{lead['id']}"},
+                {"text": "❌ رفض",           "callback_data": f"outbound_reject:{lead['id']}"},
+            ]]
         }
 
-        leads = await self._fetch_pending(limit=self.daily_limit)
-        if not leads:
-            self._log.info("outbound_sender.no_pending_leads")
-            return results
+        ok = False
+        for chat_id in self.owner_chat_ids:
+            ok = await self.telegram.send_message_with_keyboard(chat_id, text, keyboard) or ok
+        return ok
 
-        self._log.info("outbound_sender.starting", total=len(leads))
+    # ── Callback handler (called from webhook) ─────────────────────────────────
 
-        for lead in leads:
-            phone = (lead.get("phone") or "").strip()
-            if not phone or phone == "+966500000000":
-                results["skipped_no_phone"] += 1
-                continue
+    async def handle_approval(self, lead_id: str, approved: bool) -> str:
+        """
+        Called from /webhook/telegram when owner taps ✅ or ❌.
+        Returns a short Arabic status string shown in Telegram toast.
+        """
+        if not approved:
+            await self._update_approval_status(lead_id, "REJECTED")
+            return "❌ تم الرفض"
 
-            company = lead.get("name", "")
-            raw = lead.get("raw_data") or {}
-            if isinstance(raw, str):
-                import json
-                try:
-                    raw = json.loads(raw)
-                except Exception:
-                    raw = {}
+        # Check daily cap before sending
+        today_sent = await self._count_today_sent()
+        if today_sent >= self.daily_cap:
+            return f"⚠️ وصلنا الحد اليومي ({self.daily_cap}). سيُرسل غداً."
 
+        lead = await self._get_lead(lead_id)
+        if not lead:
+            return "⚠️ العميل غير موجود في CRM"
+
+        phone = (lead.get("phone") or "").strip()
+        if not phone or phone == "+966500000000":
+            return "⚠️ لا يوجد رقم هاتف"
+
+        await self._update_approval_status(lead_id, "APPROVED")
+
+        # Get draft message
+        raw = lead.get("raw_data") or {}
+        if isinstance(raw, str):
             try:
-                # Use draft_message pre-written by google_maps_engine (Gemini)
-                message = raw.get("draft_message", "").strip()
-                if not message:
-                    # Fallback: build from template
-                    prospect = {"company": company, "city": "", "activity": ""}
-                    message = build_outreach_for_prospect(prospect, "generic")
+                raw = json.loads(raw)
+            except Exception:
+                raw = {}
+        message = (raw.get("draft_message") or "").strip()
+        if not message:
+            message = build_outreach_for_prospect(
+                {"company": lead.get("name", ""), "city": "الرياض", "activity": ""},
+                "generic",
+            )
 
-                # Send via WAHA
-                sent = await self.notifier.send_custom_message(phone, message)
+        sent = await self.notifier.send_custom_message(phone, message)
+        if sent:
+            await self._mark_sent(lead_id, message)
+            self._log.info("outbound.sent", name=lead.get("name"), phone=phone)
+            return f"✅ أُرسلت لـ *{lead.get('name')}*"
+        else:
+            self._log.warning("outbound.send_failed", lead_id=lead_id, phone=phone)
+            return f"❌ فشل الإرسال — {phone}"
 
-                if sent:
-                    await self._mark_contacted(lead["id"], message)
-                    results["sent"] += 1
-                    self._log.info(
-                        "outbound_sender.sent",
-                        company=company,
-                        phone=phone,
-                    )
-                else:
-                    results["failed"] += 1
+    # ── Legacy entry point (kept for backwards compat) ─────────────────────────
 
-                # Throttle: 3 seconds between messages
-                await asyncio.sleep(3)
+    async def send_pending_outreach(self) -> dict:
+        """Redirects to the approval batch flow."""
+        return await self.send_daily_approval_batch()
 
-            except Exception as exc:
-                results["failed"] += 1
-                results["errors"].append(f"{company}: {str(exc)[:80]}")
-                self._log.error("outbound_sender.error", company=company, error=str(exc))
-
-        self._log.info("outbound_sender.complete", **{k: v for k, v in results.items() if k != "errors"})
-        return results
+    # ── Supabase helpers ───────────────────────────────────────────────────────
 
     async def _fetch_pending(self, limit: int) -> list[dict]:
-        """Read serpapi prospects from leads table with phone set and status='new'."""
+        """Fetch leads with approval_status=PENDING, phone set, status=new."""
+        loop = asyncio.get_running_loop()
         try:
-            result = await asyncio.get_running_loop().run_in_executor(
+            result = await loop.run_in_executor(
                 None,
                 lambda: self.crm.client.table("leads")
                     .select("*")
-                    .eq("source", "serpapi_prospecting")
-                    .eq("status", "new")
+                    .eq("approval_status", "PENDING")
                     .not_.is_("phone", "null")
                     .neq("phone", "")
+                    .eq("status", "new")
                     .order("score", desc=True)
                     .limit(limit)
                     .execute()
             )
             return result.data or []
-        except Exception as exc:
-            self._log.error("outbound_sender.fetch_failed", error=str(exc))
-            return []
+        except Exception:
+            # Fallback: approval_status column may not exist yet
+            try:
+                result = await loop.run_in_executor(
+                    None,
+                    lambda: self.crm.client.table("leads")
+                        .select("*")
+                        .not_.is_("phone", "null")
+                        .neq("phone", "")
+                        .eq("status", "new")
+                        .order("score", desc=True)
+                        .limit(limit)
+                        .execute()
+                )
+                return result.data or []
+            except Exception as exc:
+                self._log.error("outbound.fetch_failed", error=str(exc))
+                return []
 
-    async def _mark_contacted(self, lead_id: str, message: str) -> None:
-        """Update lead status to contacted."""
+    async def _count_today_sent(self) -> int:
+        """Count how many leads were sent today (approval_status=SENT)."""
+        loop = asyncio.get_running_loop()
+        today = date.today().isoformat()
         try:
-            now = datetime.utcnow().isoformat()
-            await asyncio.get_running_loop().run_in_executor(
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .select("id", count="exact")
+                    .eq("approval_status", "SENT")
+                    .gte("updated_at", today)
+                    .execute()
+            )
+            return result.count or 0
+        except Exception:
+            return 0
+
+    async def _get_lead(self, lead_id: str) -> Optional[dict]:
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .select("*")
+                    .eq("id", lead_id)
+                    .limit(1)
+                    .execute()
+            )
+            rows = result.data or []
+            return rows[0] if rows else None
+        except Exception as exc:
+            self._log.error("outbound.get_lead_failed", lead_id=lead_id, error=str(exc))
+            return None
+
+    async def _update_approval_status(self, lead_id: str, status: str) -> None:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .update({"approval_status": status, "updated_at": datetime.utcnow().isoformat()})
+                    .eq("id", lead_id)
+                    .execute()
+            )
+        except Exception as exc:
+            self._log.warning("outbound.update_status_failed", lead_id=lead_id, error=str(exc))
+
+    async def _mark_sent(self, lead_id: str, message: str) -> None:
+        loop = asyncio.get_running_loop()
+        now = datetime.utcnow().isoformat()
+        try:
+            await loop.run_in_executor(
                 None,
                 lambda: self.crm.client.table("leads")
                     .update({
+                        "approval_status": "SENT",
                         "status": "contacted",
                         "notes": f"[outbound] {message[:200]}",
                         "updated_at": now,
@@ -148,4 +295,13 @@ class OutboundSender:
                     .execute()
             )
         except Exception as exc:
-            self._log.warning("outbound_sender.mark_failed", lead_id=lead_id, error=str(exc))
+            self._log.warning("outbound.mark_sent_failed", lead_id=lead_id, error=str(exc))
+
+    async def _notify_owner(self, message: str) -> None:
+        if not self.telegram or not self.owner_chat_ids:
+            return
+        for chat_id in self.owner_chat_ids:
+            try:
+                await self.telegram.send_message(chat_id, message)
+            except Exception:
+                pass

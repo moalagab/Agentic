@@ -176,17 +176,17 @@ class SmartfieldScheduler:
             misfire_grace_time=600,
         )
 
-        # SerpAPI prospecting — every day at 8:45 AM (diversified source)
-        self.scheduler.add_job(
-            self._run_serpapi_prospecting,
-            CronTrigger(hour=8, minute=45, timezone=RIYADH_TZ),
-            id="serpapi_prospecting",
-            name="البحث عن عملاء — SerpAPI",
-            replace_existing=True,
-            misfire_grace_time=600,
-        )
+        # SerpAPI prospecting — DISABLED (Outscraper أفضل في تغطية أرقام الهواتف)
+        # self.scheduler.add_job(
+        #     self._run_serpapi_prospecting,
+        #     CronTrigger(hour=8, minute=45, timezone=RIYADH_TZ),
+        #     id="serpapi_prospecting",
+        #     name="البحث عن عملاء — SerpAPI",
+        #     replace_existing=True,
+        #     misfire_grace_time=600,
+        # )
 
-        logger.info("scheduler.jobs_registered", count=11)
+        logger.info("scheduler.jobs_registered", count=10)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -297,34 +297,17 @@ class SmartfieldScheduler:
             logger.error("scheduler.learning_loop_error", error=str(exc))
 
     async def _run_outbound_sender(self):
-        """Send personalized outreach to outbound_leads with phone numbers."""
+        """
+        Send daily approval batch to Telegram owner.
+        Owner taps ✅/❌ on each lead — WhatsApp is sent only after approval.
+        """
         logger.info("scheduler.running_outbound_sender")
         if not self.outbound_sender:
             logger.debug("scheduler.outbound_sender_skipped", reason="outbound_sender not set")
             return
         try:
-            results = await self.outbound_sender.send_pending_outreach()
-            logger.info(
-                "scheduler.outbound_sender_complete",
-                sent=results.get("sent", 0),
-                skipped=results.get("skipped_no_phone", 0),
-                failed=results.get("failed", 0),
-            )
-            # Notify owner with summary
-            if results.get("sent", 0) > 0:
-                summary = (
-                    f"*Outreach اليومي*\n"
-                    f"━━━━━━━━━━━━━\n"
-                    f"✅ أُرسل: {results['sent']}\n"
-                    f"⏭ بدون رقم: {results['skipped_no_phone']}\n"
-                    f"❌ فشل: {results['failed']}"
-                )
-                if self.employee.telegram and self.employee._owner_telegram_ids:
-                    for chat_id in self.employee._owner_telegram_ids:
-                        await self.employee.telegram.send_message(chat_id, summary)
-                else:
-                    for phone in self.employee._owner_phones:
-                        await self.employee._send_whatsapp(phone, summary)
+            results = await self.outbound_sender.send_daily_approval_batch()
+            logger.info("scheduler.outbound_sender_complete", **results)
         except Exception as exc:
             logger.error("scheduler.outbound_sender_error", error=str(exc))
 
@@ -424,13 +407,16 @@ class SmartfieldScheduler:
             logger.error("scheduler.serpapi_prospecting_error", error=str(exc))
 
     async def _run_content_plan(self):
-        """Generate weekly content plan and send to owner (Layer 7)."""
+        """
+        Generate weekly social content (X + Instagram + LinkedIn) and upload to Buffer.
+        Runs every Saturday 7:00 PM — owner gets Telegram notification when drafts are ready.
+        """
         logger.info("scheduler.running_content_plan")
         if not self.content_engine:
             logger.debug("scheduler.content_plan_skipped", reason="content_engine not set")
             return
         try:
-            # Get pipeline stats for context
+            config = self.employee.config
             pipeline_data = {}
             if self.pipeline:
                 try:
@@ -438,17 +424,36 @@ class SmartfieldScheduler:
                 except Exception:
                     pass
 
-            plan = await self.content_engine.generate_weekly_content_plan(pipeline_data=pipeline_data)
+            # Generate and upload to Buffer
+            summary = await self.content_engine.generate_and_upload_weekly_content(
+                buffer_token=getattr(config, "BUFFER_ACCESS_TOKEN", ""),
+                x_channel_id=getattr(config, "BUFFER_X_CHANNEL_ID", ""),
+                instagram_channel_id=getattr(config, "BUFFER_INSTAGRAM_CHANNEL_ID", ""),
+                x_bearer_token=getattr(config, "X_BEARER_TOKEN", ""),
+                pipeline_data=pipeline_data,
+            )
 
-            # Format and send
-            lines = ["*خطة المحتوى الأسبوعية — LinkedIn*", "━━━━━━━━━━━━━━"]
-            for item in plan:
-                lines.append(f"\n*{item['day']}* — {item['content_type']}")
-                lines.append(f"الهدف: {item['revenue_goal']}")
-                preview = item["post"][:120].replace("\n", " ")
-                lines.append(f"_{preview}..._")
+            total = summary.get("x_posts", 0) + summary.get("ig_reels", 0) + summary.get("ig_posts", 0)
+            uploaded = summary.get("buffer_uploads", 0)
 
-            msg = "\n".join(lines)
+            if uploaded > 0:
+                msg = (
+                    f"📅 *محتوى الأسبوع جاهز على Buffer*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"X: {summary.get('x_posts', 0)} تغريدة\n"
+                    f"Instagram Reels: {summary.get('ig_reels', 0)}\n"
+                    f"Instagram Posts: {summary.get('ig_posts', 0)}\n"
+                    f"المرفوع على Buffer: {uploaded} قطعة\n"
+                    f"_راجع Buffer وانشر بعد موافقتك_"
+                )
+            else:
+                msg = (
+                    f"📅 *محتوى الأسبوع جاهز (Buffer غير مضبوط)*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"تم توليد {total} قطعة محتوى\n"
+                    f"X: {summary.get('x_posts', 0)} | IG: {summary.get('ig_reels', 0) + summary.get('ig_posts', 0)}\n"
+                    f"_محفوظة في generated_content/ على السيرفر_"
+                )
 
             if self.employee.telegram and self.employee._owner_telegram_ids:
                 for chat_id in self.employee._owner_telegram_ids:
@@ -457,6 +462,6 @@ class SmartfieldScheduler:
                 for phone in self.employee._owner_phones:
                     await self.employee._send_whatsapp(phone, msg)
 
-            logger.info("scheduler.content_plan_sent", posts=len(plan))
+            logger.info("scheduler.content_plan_complete", total_pieces=total, buffer_uploads=uploaded)
         except Exception as exc:
             logger.error("scheduler.content_plan_error", error=str(exc))

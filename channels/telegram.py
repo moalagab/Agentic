@@ -118,3 +118,60 @@ class TelegramHandler:
                 await client.post(url, json={"chat_id": chat_id, "action": "typing"})
         except Exception:
             pass
+
+    async def send_message_with_keyboard(
+        self,
+        chat_id: str,
+        text: str,
+        inline_keyboard: dict,
+    ) -> bool:
+        """Send a message with an inline keyboard (approval buttons)."""
+        url = TELEGRAM_API.format(token=self.token, method="sendMessage")
+        payload = {
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": inline_keyboard,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.post(url, json=payload)
+                data = r.json()
+                if data.get("ok"):
+                    return True
+                # Retry without Markdown on parse error
+                if "parse entities" in data.get("description", ""):
+                    payload.pop("parse_mode", None)
+                    r2 = await client.post(url, json=payload)
+                    return r2.json().get("ok", False)
+                self._log.warning("send_keyboard failed", response=data)
+                return False
+        except Exception as exc:
+            self._log.error("send_message_with_keyboard failed", chat_id=chat_id, error=str(exc))
+            return False
+
+    async def answer_callback_query(self, callback_query_id: str, text: str = "") -> bool:
+        """Acknowledge an inline button press (removes loading spinner)."""
+        url = TELEGRAM_API.format(token=self.token, method="answerCallbackQuery")
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.post(url, json={
+                    "callback_query_id": callback_query_id,
+                    "text": text,
+                    "show_alert": False,
+                })
+                return r.json().get("ok", False)
+        except Exception:
+            return False
+
+    def extract_callback_query(self, payload: dict) -> Optional[dict]:
+        """Extract callback_query data from a Telegram update (inline button press)."""
+        cq = payload.get("callback_query")
+        if not cq:
+            return None
+        return {
+            "id":      cq.get("id"),
+            "chat_id": str(cq.get("message", {}).get("chat", {}).get("id", "")),
+            "data":    cq.get("data", ""),
+            "from":    cq.get("from", {}).get("first_name", ""),
+        }

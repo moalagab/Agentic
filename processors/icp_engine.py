@@ -148,11 +148,11 @@ def score_lead_icp(lead: Lead) -> tuple[int, str]:
         category,
     ])
 
+    # pharma_beauty removed — not an active ICP segment for Smart Field
     scores = {
-        ICPSegment.PREMIUM_FB:    _score_premium_fb(search_text, rating, review_count),
-        ICPSegment.PHARMA_BEAUTY: _score_pharma_beauty(search_text, category),
-        ICPSegment.FRESH_FOOD:    _score_fresh_food(search_text, rating),
-        ICPSegment.HORECA:        _score_horeca(search_text, review_count),
+        ICPSegment.PREMIUM_FB: _score_premium_fb(search_text, rating, review_count),
+        ICPSegment.FRESH_FOOD: _score_fresh_food(search_text, rating),
+        ICPSegment.HORECA:     _score_horeca(search_text, review_count),
     }
 
     best_segment = max(scores, key=lambda s: scores[s])

@@ -175,8 +175,11 @@ async def lifespan(app: FastAPI):
             )
             _outbound_sender = OutboundSender(
                 crm=_pipeline.primary_crm,
-                notifier=_wa_notifier,  # WhatsApp (WAHA), not Telegram
+                notifier=_wa_notifier,
                 anthropic_api_key=settings.GEMINI_API_KEY,
+                telegram=_tg_handler,
+                owner_chat_ids=[str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])],
+                daily_cap=10,
             )
             log.info("Customer Success + Learning Loop + Outbound Sender initialized")
         except Exception as exc:
@@ -1082,8 +1085,14 @@ async def telegram_webhook(
         raise HTTPException(status_code=503, detail="Telegram not configured")
 
     payload = await request.json()
-    msg = _tg_handler.extract_message(payload)
 
+    # Handle inline button presses (callback_query)
+    cq = _tg_handler.extract_callback_query(payload)
+    if cq:
+        background_tasks.add_task(_handle_telegram_callback, cq)
+        return {"ok": True}
+
+    msg = _tg_handler.extract_message(payload)
     if msg:
         background_tasks.add_task(
             _handle_telegram_message,
@@ -1117,6 +1126,39 @@ async def _handle_telegram_message(chat_id: str, name: str, text: str):
     except Exception as exc:
         logger.error("employee.telegram_failed", chat_id=chat_id, error=str(exc))
         await _tg_handler.send_message(chat_id, "عذراً، حدث خطأ. سنعود إليك قريباً. 🙏")
+
+
+async def _handle_telegram_callback(cq: dict):
+    """Handle Telegram inline keyboard callback queries (outbound approval buttons)."""
+    if not _tg_handler:
+        return
+
+    callback_id = cq.get("id", "")
+    chat_id     = cq.get("chat_id", "")
+    data        = cq.get("data", "")
+
+    try:
+        # Outbound approval: outbound_approve:{lead_id} / outbound_reject:{lead_id}
+        if data.startswith("outbound_approve:") or data.startswith("outbound_reject:"):
+            if not _outbound_sender:
+                await _tg_handler.answer_callback_query(callback_id, "⚠️ النظام غير جاهز")
+                return
+            approved = data.startswith("outbound_approve:")
+            lead_id  = data.split(":", 1)[1]
+            status_msg = await _outbound_sender.handle_approval(lead_id, approved)
+            await _tg_handler.answer_callback_query(callback_id, status_msg[:200])
+            await _tg_handler.send_message(chat_id, status_msg)
+            return
+
+        # Unknown callback — just acknowledge
+        await _tg_handler.answer_callback_query(callback_id)
+
+    except Exception as exc:
+        logger.error("telegram_callback.failed", data=data, error=str(exc))
+        try:
+            await _tg_handler.answer_callback_query(callback_id, "❌ خطأ")
+        except Exception:
+            pass
 
 
 @app.post("/setup/telegram-webhook", tags=["System"])
