@@ -479,11 +479,12 @@ class SmartfieldScheduler:
                 buffer_token=getattr(config, "BUFFER_ACCESS_TOKEN", ""),
                 x_channel_id=getattr(config, "BUFFER_X_CHANNEL_ID", ""),
                 instagram_channel_id=getattr(config, "BUFFER_INSTAGRAM_CHANNEL_ID", ""),
+                tiktok_channel_id=getattr(config, "BUFFER_TIKTOK_CHANNEL_ID", ""),
                 x_bearer_token=getattr(config, "X_BEARER_TOKEN", ""),
                 pipeline_data=pipeline_data,
             )
 
-            total = summary.get("x_posts", 0) + summary.get("ig_reels", 0) + summary.get("ig_posts", 0)
+            total = summary.get("x_posts", 0) + summary.get("ig_reels", 0) + summary.get("ig_posts", 0) + summary.get("tiktok_scripts", 0)
             uploaded = summary.get("buffer_uploads", 0)
 
             if uploaded > 0:

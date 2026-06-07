@@ -755,6 +755,7 @@ async def generate_social_content(settings: Settings = Depends(get_settings_dep)
             buffer_token=getattr(settings, "BUFFER_ACCESS_TOKEN", ""),
             x_channel_id=getattr(settings, "BUFFER_X_CHANNEL_ID", ""),
             instagram_channel_id=getattr(settings, "BUFFER_INSTAGRAM_CHANNEL_ID", ""),
+            tiktok_channel_id=getattr(settings, "BUFFER_TIKTOK_CHANNEL_ID", ""),
             x_bearer_token=getattr(settings, "X_BEARER_TOKEN", ""),
             pipeline_data=pipeline_data,
         )
@@ -766,6 +767,7 @@ async def generate_social_content(settings: Settings = Depends(get_settings_dep)
             f"X: {summary.get('x_posts', 0)} تغريدة\n"
             f"Instagram Reels: {summary.get('ig_reels', 0)}\n"
             f"Instagram Posts: {summary.get('ig_posts', 0)}\n"
+            f"TikTok Scripts: {summary.get('tiktok_scripts', 0)}\n"
             f"Buffer uploads: {summary.get('buffer_uploads', 0)}\n"
             f"ترندات Google: {', '.join(summary.get('google_trends_used', []))}\n"
             f"أخبار الصناعة: {summary.get('industry_news_count', 0)} خبر"

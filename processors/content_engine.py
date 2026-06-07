@@ -240,6 +240,7 @@ class ContentEngine:
         buffer_token: str = "",
         x_channel_id: str = "",
         instagram_channel_id: str = "",
+        tiktok_channel_id: str = "",
         x_bearer_token: str = "",
         pipeline_data: Optional[dict] = None,
     ) -> dict:
@@ -287,18 +288,18 @@ class ContentEngine:
         )
 
         # Generate content in parallel
-        x_posts_task = self._generate_x_posts(7, context)
-        ig_reels_task = self._generate_instagram_reels(3, context)
-        ig_posts_task = self._generate_instagram_posts(2, context)
-
-        x_posts, ig_reels, ig_posts = await asyncio.gather(
-            x_posts_task, ig_reels_task, ig_posts_task
+        x_posts, ig_reels, ig_posts, tiktok_scripts = await asyncio.gather(
+            self._generate_x_posts(7, context),
+            self._generate_instagram_reels(3, context),
+            self._generate_instagram_posts(2, context),
+            self._generate_tiktok_scripts(3, context),
         )
 
         summary = {
             "x_posts": len(x_posts),
             "ig_reels": len(ig_reels),
             "ig_posts": len(ig_posts),
+            "tiktok_scripts": len(tiktok_scripts),
             "buffer_uploads": 0,
             "trends_used": trends[:3],
             "google_trends_used": google_trends[:3],
@@ -314,12 +315,15 @@ class ContentEngine:
                 self._log.info("content.x_uploaded", count=uploaded)
 
             if instagram_channel_id and (ig_reels or ig_posts):
-                ig_all = ig_reels + ig_posts
-                uploaded = await _upload_batch_to_buffer(buffer_token, instagram_channel_id, ig_all)
+                uploaded = await _upload_batch_to_buffer(buffer_token, instagram_channel_id, ig_reels + ig_posts)
                 summary["buffer_uploads"] += uploaded
                 self._log.info("content.ig_uploaded", count=uploaded)
+
+            if tiktok_channel_id and tiktok_scripts:
+                uploaded = await _upload_batch_to_buffer(buffer_token, tiktok_channel_id, tiktok_scripts)
+                summary["buffer_uploads"] += uploaded
+                self._log.info("content.tiktok_uploaded", count=uploaded)
         else:
-            # Store locally if no Buffer
             self._save_content_locally(x_posts, ig_reels, ig_posts)
 
         self._log.info("content.weekly_generation_done", **{k: v for k, v in summary.items() if isinstance(v, int)})
@@ -474,6 +478,50 @@ HASHTAGS: [5-8 هاشتاقات]
 
         self._log.info("content.ig_posts_generated", count=len(captions))
         return captions
+
+    # ── TikTok Scripts ──────────────────────────────────────────────────────────
+
+    async def _generate_tiktok_scripts(self, count: int, context: str) -> list[str]:
+        """Generate TikTok video scripts — 15-60s, hook-driven, vertical format."""
+        topics = [
+            "درجة حرارة واحدة غلط — كيف تتلف شحنة كاملة",
+            "يوم في حياة سائق نقل مبرد بالرياض",
+            "الفرق بين ناقل عادي وناقل مبرد محترف",
+        ]
+
+        scripts = []
+        for i in range(min(count, len(topics))):
+            topic = topics[i]
+            prompt = f"""اكتب سكريبت TikTok (15-60 ثانية) لحساب @smartclog1 عن Smart Field للنقل المبرد.
+
+الموضوع: {topic}
+السياق الأسبوعي: {context}
+
+القواعد:
+- HOOK قوي في أول 2 ثانية — جملة واحدة صادمة أو سؤال مثير
+- أسلوب خلف الكواليس — حقيقي ومباشر، لا مصطنع
+- نبرة شبابية لكن مهنية — تناسب TikTok السعودي
+- رقم واحد محدد كدليل (مثل: 90 دقيقة، درجة واحدة، 160 ريال)
+- CTA في النهاية: متابعة أو تعليق أو مشاركة
+
+الهيكل:
+HOOK: [أول جملة — 2 ثانية]
+SCENE 1: [15 ثانية]
+SCENE 2: [15 ثانية]
+SCENE 3: [15 ثانية — اختياري]
+CTA: [جملة ختامية]
+CAPTION: [كابشن TikTok مع هاشتاقات]
+
+اكتب بالعربي فقط."""
+
+            try:
+                script = await get_text(self.api_key, CONTENT_SYSTEM_PROMPT, prompt, max_tokens=450)
+                scripts.append(script.strip())
+            except Exception as exc:
+                self._log.warning("content.tiktok_failed", topic=topic, error=str(exc))
+
+        self._log.info("content.tiktok_scripts_generated", count=len(scripts))
+        return scripts
 
     def _save_content_locally(
         self, x_posts: list, ig_reels: list, ig_posts: list
