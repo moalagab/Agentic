@@ -159,6 +159,7 @@ async def upload_to_buffer(
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
+        __typename
         ... on PostActionSuccess {
           post { id status }
         }
@@ -187,13 +188,19 @@ async def upload_to_buffer(
                 },
             )
             result = r.json()
-            post_data = result.get("data", {}).get("createPost", {}).get("post", {})
+            # Real GraphQL errors (schema/auth issues)
+            if result.get("errors"):
+                logger.warning("buffer.create_failed", errors=result["errors"])
+                return {"error": str(result["errors"])}
+            create_result = result.get("data", {}).get("createPost", {})
+            post_data = create_result.get("post", {})
             if post_data.get("id"):
                 logger.info("buffer.post_queued", channel=channel_id, post_id=post_data["id"])
                 return {"success": True, "id": post_data["id"]}
-            errors = result.get("errors", [{"message": "unknown"}])
-            logger.warning("buffer.create_failed", errors=errors)
-            return {"error": str(errors)}
+            # Non-success union type (e.g. UnexpectedError, queue full)
+            typename = create_result.get("__typename", "unknown")
+            logger.warning("buffer.create_failed", typename=typename)
+            return {"error": typename}
     except Exception as exc:
         logger.error("buffer.upload_error", error=str(exc))
         return {"error": str(exc)}
@@ -308,20 +315,14 @@ class ContentEngine:
         }
 
         # Upload to Buffer
-        # Note: Instagram requires media (image/video) — text-only uploads are rejected.
-        # X accepts text-only. TikTok scripts are saved as text drafts.
-        if buffer_token:
-            if x_channel_id and x_posts:
-                uploaded = await _upload_batch_to_buffer(buffer_token, x_channel_id, x_posts)
-                summary["buffer_uploads"] += uploaded
-                self._log.info("content.x_uploaded", count=uploaded)
+        # X accepts text-only. Instagram + TikTok return UnexpectedError for text-only
+        # (they require media). Save IG + TikTok locally for human review.
+        if buffer_token and x_channel_id and x_posts:
+            uploaded = await _upload_batch_to_buffer(buffer_token, x_channel_id, x_posts)
+            summary["buffer_uploads"] += uploaded
+            self._log.info("content.x_uploaded", count=uploaded)
 
-            if tiktok_channel_id and tiktok_scripts:
-                uploaded = await _upload_batch_to_buffer(buffer_token, tiktok_channel_id, tiktok_scripts)
-                summary["buffer_uploads"] += uploaded
-                self._log.info("content.tiktok_uploaded", count=uploaded)
-
-        # Always save all content locally (IG needs images before Buffer upload)
+        # Always save all content locally (IG + TikTok need media before posting)
         self._save_content_locally(x_posts, ig_reels, ig_posts, tiktok_scripts)
         self._log.info("content.ig_saved_locally", reels=len(ig_reels), posts=len(ig_posts))
 
