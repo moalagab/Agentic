@@ -308,23 +308,22 @@ class ContentEngine:
         }
 
         # Upload to Buffer
+        # Note: Instagram requires media (image/video) — text-only uploads are rejected.
+        # X accepts text-only. TikTok scripts are saved as text drafts.
         if buffer_token:
             if x_channel_id and x_posts:
                 uploaded = await _upload_batch_to_buffer(buffer_token, x_channel_id, x_posts)
                 summary["buffer_uploads"] += uploaded
                 self._log.info("content.x_uploaded", count=uploaded)
 
-            if instagram_channel_id and (ig_reels or ig_posts):
-                uploaded = await _upload_batch_to_buffer(buffer_token, instagram_channel_id, ig_reels + ig_posts)
-                summary["buffer_uploads"] += uploaded
-                self._log.info("content.ig_uploaded", count=uploaded)
-
             if tiktok_channel_id and tiktok_scripts:
                 uploaded = await _upload_batch_to_buffer(buffer_token, tiktok_channel_id, tiktok_scripts)
                 summary["buffer_uploads"] += uploaded
                 self._log.info("content.tiktok_uploaded", count=uploaded)
-        else:
-            self._save_content_locally(x_posts, ig_reels, ig_posts)
+
+        # Always save all content locally (IG needs images before Buffer upload)
+        self._save_content_locally(x_posts, ig_reels, ig_posts, tiktok_scripts)
+        self._log.info("content.ig_saved_locally", reels=len(ig_reels), posts=len(ig_posts))
 
         self._log.info("content.weekly_generation_done", **{k: v for k, v in summary.items() if isinstance(v, int)})
         return summary
@@ -524,25 +523,26 @@ CAPTION: [كابشن TikTok مع هاشتاقات]
         return scripts
 
     def _save_content_locally(
-        self, x_posts: list, ig_reels: list, ig_posts: list
+        self, x_posts: list, ig_reels: list, ig_posts: list, tiktok_scripts: list = None
     ) -> None:
-        """Save generated content to a local markdown file when Buffer is not configured."""
+        """Save all generated content to a local markdown file for review."""
         output_dir = KNOWLEDGE_DIR.parent / "generated_content"
         output_dir.mkdir(exist_ok=True)
         week = date.today().strftime("%Y-W%V")
         path = output_dir / f"content_{week}.md"
-        lines = [
-            f"# محتوى الأسبوع — {week}\n",
-            "## X Posts\n",
-        ]
+        lines = [f"# محتوى الأسبوع — {week}\n", "## X Posts (مرفوع على Buffer)\n"]
         for i, post in enumerate(x_posts, 1):
             lines.append(f"### تغريدة {i}\n{post}\n")
-        lines.append("## Instagram Reels\n")
+        lines.append("## Instagram Reels (يحتاج صورة/فيديو قبل النشر)\n")
         for i, script in enumerate(ig_reels, 1):
             lines.append(f"### ريل {i}\n{script}\n")
-        lines.append("## Instagram Posts\n")
+        lines.append("## Instagram Posts (يحتاج صورة قبل النشر)\n")
         for i, caption in enumerate(ig_posts, 1):
             lines.append(f"### منشور {i}\n{caption}\n")
+        if tiktok_scripts:
+            lines.append("## TikTok Scripts (مرفوع على Buffer)\n")
+            for i, script in enumerate(tiktok_scripts, 1):
+                lines.append(f"### سكريبت TikTok {i}\n{script}\n")
         path.write_text("\n".join(lines), encoding="utf-8")
         self._log.info("content.saved_locally", path=str(path))
 

@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     BUFFER_ACCESS_TOKEN: str = Field(default="", description="Buffer access token — buffer.com")
     BUFFER_X_CHANNEL_ID: str = Field(default="", description="Buffer channel ID for X/Twitter")
     BUFFER_INSTAGRAM_CHANNEL_ID: str = Field(default="", description="Buffer channel ID for Instagram")
+    BUFFER_TIKTOK_CHANNEL_ID: str = Field(default="", description="Buffer channel ID for TikTok")
+    BUFFER_ORG_ID: str = Field(default="", description="Buffer organization ID")
 
     # ─── X (Twitter) API ─────────────────────────────────────────────────────
     X_BEARER_TOKEN: str = Field(default="", description="X API v2 Bearer Token — for trending topics")

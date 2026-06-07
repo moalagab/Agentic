@@ -253,15 +253,17 @@ _SAUDI_FOOD_TREND_QUERIES = [
 
 async def fetch_saudi_google_trends(api_key: str, max_results: int = 5) -> list[str]:
     """
-    جلب الموضوعات الرائجة على Google في السعودية — engine: google_trends_trending_now
-    Returns list of trending topic strings.
+    جلب اهتمام السوق السعودي بمواضيع Cold Chain عبر Google Trends.
+    يستخدم engine: google_trends مع كلمات مفتاحية صناعية — بديل عن trending_now المحذوف.
     """
     if not api_key:
         return []
+    # Use interest-over-time for our industry keywords in SA
     params = {
-        "engine": "google_trends_trending_now",
-        "frequency": "daily",
+        "engine": "google_trends",
+        "q": "نقل مبرد,سلسلة التوريد,أغذية فاخرة,مستودعات تبريد",
         "geo": "SA",
+        "date": "today 1-m",
         "hl": "ar",
         "api_key": api_key,
     }
@@ -272,15 +274,18 @@ async def fetch_saudi_google_trends(api_key: str, max_results: int = 5) -> list[
                 logger.warning(f"SerpAPI trends {resp.status_code}: {resp.text[:120]}")
                 return []
             data = resp.json()
-            trending = data.get("trending_searches", [])
+            # interest_over_time → timeline_data → top queries or related topics
+            related = data.get("related_queries", {})
             topics: list[str] = []
-            for item in trending[:max_results]:
-                q = item.get("query", {})
-                topic = q.get("query", "") if isinstance(q, dict) else str(q)
-                if topic:
-                    topics.append(topic)
-            logger.info(f"SerpAPI trends: fetched {len(topics)} Saudi topics")
-            return topics
+            for section in ("rising", "top"):
+                for item in related.get(section, [])[:max_results]:
+                    q = item.get("query", "")
+                    if q and q not in topics:
+                        topics.append(q)
+                if len(topics) >= max_results:
+                    break
+            logger.info(f"SerpAPI trends: fetched {len(topics)} Saudi industry topics")
+            return topics[:max_results]
         except Exception as exc:
             logger.error(f"SerpAPI trends error: {exc}")
             return []
