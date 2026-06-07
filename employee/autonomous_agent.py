@@ -65,7 +65,19 @@ def _load_brand_guidelines() -> str:
         return ""
 
 
+def _load_whatsapp_strategy() -> str:
+    strat_file = _Path(__file__).parent.parent / "knowledge" / "smart_field_marketing_strategy_v2.json"
+    try:
+        import json as _json
+        data = _json.loads(strat_file.read_text(encoding="utf-8"))
+        instructions = data["smart_field_marketing_strategy"]["iros_implementation_notes"]["whatsapp_reply_instructions"]
+        return "\n".join(f"- {i}" for i in instructions)
+    except Exception:
+        return ""
+
+
 _BRAND_GUIDELINES = _load_brand_guidelines()
+_WHATSAPP_STRATEGY = _load_whatsapp_strategy()
 
 EMPLOYEE_SYSTEM_PROMPT = f"""\
 ## هويتك
@@ -158,6 +170,11 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 ━━━━━━━━━━━━━━━━━━━━
 BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
 {_BRAND_GUIDELINES}
+━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━
+قواعد الرد على واتساب (من استراتيجية التسويق v2.0):
+{_WHATSAPP_STRATEGY}
 ━━━━━━━━━━━━━━━━━━━━
 """
 

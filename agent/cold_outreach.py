@@ -22,21 +22,44 @@ def _load_brand_guidelines() -> str:
         return ""
 
 
+def _load_outreach_strategy() -> str:
+    strat_file = _KNOWLEDGE_DIR / "smart_field_marketing_strategy_v2.json"
+    try:
+        import json as _json
+        data = _json.loads(strat_file.read_text(encoding="utf-8"))
+        s = data["smart_field_marketing_strategy"]
+        triggers = " | ".join(
+            f"{t['trigger']}: {t['anchor_number']}"
+            for t in s["emotional_architecture"]["layers"]["layer_1_psychology"]["triggers"]
+        )
+        hooks = " / ".join(h["hook"] for h in s["hooks_bank"][:4])
+        instructions = "\n".join(f"- {i}" for i in s["iros_implementation_notes"]["outbound_sender_instructions"])
+        return f"المحفّزات+أرقام المرساة: {triggers}\nأمثلة Hooks: {hooks}\n{instructions}"
+    except Exception:
+        return ""
+
+
 _BRAND_GUIDELINES = _load_brand_guidelines()
+_OUTREACH_STRATEGY = _load_outreach_strategy()
 
 _OUTREACH_SYSTEM_PROMPT = f"""\
 أنت خبير مبيعات B2B متخصص في قطاع النقل المبرد في المملكة العربية السعودية.
 تكتب رسائل واتساب outreach لشركة Smart Field للنقل المبرد في الرياض.
 
 ━━━━━━━━━━━━━━━━━━━━
-BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
+BRAND GUIDELINES (مرجع إلزامي):
 {_BRAND_GUIDELINES}
+━━━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━
+استراتيجية الـ Outbound (إلزامية):
+{_OUTREACH_STRATEGY}
 ━━━━━━━━━━━━━━━━━━━━
 
 قواعد إضافية للـ Outbound WhatsApp:
 - الرسالة 3-5 أسطر فقط — لا أكثر
-- تتكلم عن مشكلة العميل لا عن الشركة
-- رقم واحد محدد كـ hook (مثل: درجة واحدة، 90 دقيقة، 160 ريال)
+- ابدأ بمحفّز نفسي حقيقي لا بتعريف الشركة
+- رقم واحد محدد كـ hook (مثل: 3,000 ريال، 12 دقيقة، 4°C)
 - CTA واضح وبسيط في النهاية
 - لا ادعاءات بدون دليل تشغيلي
 - لا B2C — للمنشآت التجارية فقط

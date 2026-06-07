@@ -36,33 +36,77 @@ _SA_WOEID = 23424938
 
 
 def _load_brand_guidelines() -> str:
-    """Load brand guidelines from knowledge file at startup."""
     brand_file = KNOWLEDGE_DIR / "smart_field_brand_guidelines.md"
     try:
         return brand_file.read_text(encoding="utf-8")
     except Exception:
         return ""
 
+
+def _load_marketing_strategy() -> str:
+    strat_file = KNOWLEDGE_DIR / "smart_field_marketing_strategy_v2.json"
+    try:
+        import json as _json
+        data = _json.loads(strat_file.read_text(encoding="utf-8"))
+        s = data["smart_field_marketing_strategy"]
+        pillars = "\n".join(
+            f"  {p['id']} {p['name']} — محفّز: {p['psychological_trigger']} | مثال: {p['example']}"
+            for p in s["content_pillars"]["pillars"]
+        )
+        hooks = "\n".join(f"  - {h['hook']} [{h['trigger']}]" for h in s["hooks_bank"][:6])
+        rules = s["content_rules"]
+        forbidden = " | ".join(rules["forbidden"])
+        triggers = "\n".join(
+            f"  - {t['trigger']}: \"{t['feeling']}\" → رقم مرساة: {t['anchor_number']}"
+            for t in s["emotional_architecture"]["layers"]["layer_1_psychology"]["triggers"]
+        )
+        return f"""\
+المبدأ الحاكم: {s['governing_principle']}
+التموضع: {s['core_positioning']}
+
+قواعد المحتوى الإلزامية:
+  1. {rules['rule_1']}
+  2. {rules['rule_2']}
+  3. {rules['rule_3']}
+  4. {rules['rule_4']}
+ممنوع تماماً: {forbidden}
+
+الركائز الخمس (اختر ركيزة واحدة لكل منشور):
+{pillars}
+
+المحفّزات النفسية + أرقام المرساة:
+{triggers}
+
+بنك الـ Hooks (استخدم من هنا أو اشتق منها):
+{hooks}"""
+    except Exception:
+        return ""
+
+
 _BRAND_GUIDELINES = _load_brand_guidelines()
+_MARKETING_STRATEGY = _load_marketing_strategy()
 
 CONTENT_SYSTEM_PROMPT = f"""\
 أنت خبير تسويق B2B متخصص في قطاع اللوجستيات والنقل المبرد في المملكة العربية السعودية.
 تعمل لحساب شركة Smart Field — متخصصة في النقل المبرد في الرياض.
 
 ━━━━━━━━━━━━━━━━━━━━
-BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
+BRAND GUIDELINES (مرجع إلزامي):
 {_BRAND_GUIDELINES}
 ━━━━━━━━━━━━━━━━━━━━
 
-قواعد إلزامية:
-- واثق + إنساني — يتكلم عن مشاكل السوق الحقيقية، لا عن الشركة
-- لا ادعاءات بدون دليل تشغيلي — "المصداقية قبل الادعاء"
-- لا محتوى دوائي أو طبي أبداً
-- لا أرقام عملاء أو إحصائيات مختلقة
-- لا corporate فارغ — ابتعد عن كل جملة في قسم "الصوت الخاطئ"
-- لا B2C — الجمهور دايماً مدير تشغيل أو مدير مشتريات
-- كل رسالة تحتوي رقماً واحداً محدداً كدليل
-اللغة: عربية أساساً مع مصطلحات تقنية إنجليزية طبيعية (Cold Chain, B2B, Dashboard).
+━━━━━━━━━━━━━━━━━━━━
+MARKETING STRATEGY v2.0 (إلزامي — طبّق على كل منشور):
+{_MARKETING_STRATEGY}
+━━━━━━━━━━━━━━━━━━━━
+
+قواعد التنفيذ:
+- ركيزة واحدة + محفّز نفسي واحد + رقم مرساة واحد في كل منشور
+- يُمنع توليد محتوى بلا رقم محدد — الرقم هو المحفّز
+- الـ Hook: أول 3 ثوانٍ — جملة صادمة أو سؤال من بنك الـ Hooks أعلاه
+- لا B2C — الجمهور مدير تشغيل أو مدير مشتريات
+- لا corporate فارغ — ابتعد عن "الصوت الخاطئ" في brand_guidelines
+اللغة: عربية أساساً مع مصطلحات تقنية إنجليزية (Cold Chain, B2B, GPS, Dashboard).
 """
 
 
