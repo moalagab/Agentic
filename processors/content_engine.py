@@ -34,17 +34,34 @@ BUFFER_API = "https://api.bufferapp.com/1"
 _SA_WOEID = 23424938
 
 
-CONTENT_SYSTEM_PROMPT = """\
+def _load_brand_guidelines() -> str:
+    """Load brand guidelines from knowledge file at startup."""
+    brand_file = KNOWLEDGE_DIR / "smart_field_brand_guidelines.md"
+    try:
+        return brand_file.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+_BRAND_GUIDELINES = _load_brand_guidelines()
+
+CONTENT_SYSTEM_PROMPT = f"""\
 أنت خبير تسويق B2B متخصص في قطاع اللوجستيات والنقل المبرد في المملكة العربية السعودية.
 تعمل لحساب شركة Smart Field — متخصصة في النقل المبرد في الرياض.
 
-أسلوبك:
-- واثق + إنساني — يتكلم عن مشاكل السوق الحقيقية
-- لا ادعاءات بدون دليل تشغيلي
-- لا محتوى دوائي أو طبي
-- لا أرقام عملاء مختلقة
-- لا corporate فارغ
-اللغة: عربية أساساً مع مصطلحات تقنية إنجليزية طبيعية.
+━━━━━━━━━━━━━━━━━━━━
+BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
+{_BRAND_GUIDELINES}
+━━━━━━━━━━━━━━━━━━━━
+
+قواعد إلزامية:
+- واثق + إنساني — يتكلم عن مشاكل السوق الحقيقية، لا عن الشركة
+- لا ادعاءات بدون دليل تشغيلي — "المصداقية قبل الادعاء"
+- لا محتوى دوائي أو طبي أبداً
+- لا أرقام عملاء أو إحصائيات مختلقة
+- لا corporate فارغ — ابتعد عن كل جملة في قسم "الصوت الخاطئ"
+- لا B2C — الجمهور دايماً مدير تشغيل أو مدير مشتريات
+- كل رسالة تحتوي رقماً واحداً محدداً كدليل
+اللغة: عربية أساساً مع مصطلحات تقنية إنجليزية طبيعية (Cold Chain, B2B, Dashboard).
 """
 
 
