@@ -18,6 +18,60 @@ from models.lead import LeadCreate, LeadSource
 logger = structlog.get_logger(__name__)
 
 
+# ── Escalation Detection ───────────────────────────────────────────────────────
+
+_BUYING_SIGNAL_KEYWORDS = [
+    "كم السعر", "كم التكلفة", "متى تقدر", "نبي نجرب",
+    "نبغى نبدأ", "وش الأسعار", "نحتاج توصيل",
+    "ابي اتواصل", "نقدر نتفق",
+]
+
+_COMPLAINT_KEYWORDS = [
+    "مشكلة", "تأخر", "تلف", "خسارة", "غلط",
+    "مو زين", "للأسف", "مستاء", "مو راضي", "رفع شكوى",
+]
+
+
+def detect_escalation(text: str) -> Optional[str]:
+    """
+    Returns 'buying_signal', 'complaint', or None.
+    Called on every inbound WhatsApp message before auto-reply.
+    """
+    t = text.lower()
+    for kw in _BUYING_SIGNAL_KEYWORDS:
+        if kw in t:
+            return "buying_signal"
+    for kw in _COMPLAINT_KEYWORDS:
+        if kw in t:
+            return "complaint"
+    return None
+
+
+def build_escalation_telegram_message(
+    escalation_type: str,
+    name: str,
+    phone: str,
+    last_message: str,
+) -> str:
+    """Format the Telegram alert sent to the owner on escalation."""
+    preview = last_message[:200].replace("_", " ").replace("*", "")
+    if escalation_type == "buying_signal":
+        return (
+            f"🟢 *عميل جاهز للإغلاق*\n"
+            f"الاسم: {name}\n"
+            f"الرسالة: _{preview}_\n"
+            f"الهاتف: `{phone}`\n\n"
+            f"تدخّل الآن ✅"
+        )
+    return (
+        f"🔴 *شكوى واردة*\n"
+        f"الاسم: {name}\n"
+        f"الرسالة: _{preview}_\n"
+        f"الهاتف: `{phone}`\n\n"
+        f"تدخّل فوراً ⚠️"
+    )
+
+
 def _extract_phone_from_message(wa_id: str) -> str:
     """Normalize WhatsApp phone number to E.164 format."""
     cleaned = re.sub(r"[^\d+]", "", wa_id)

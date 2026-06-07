@@ -88,6 +88,11 @@ _WA_DEDUP_MAX = 500
 _processed_leads: dict[str, tuple[ProcessedLead, datetime]] = {}
 _LEAD_CACHE_TTL_H = 24
 
+# Escalated threads — owner is handling these; auto-reply paused for 2 hours
+# phone → expiry_timestamp (float)
+_escalated_threads: dict[str, float] = {}
+_THREAD_LOCK_TTL_S = 7200  # 2 hours
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1014,33 +1019,119 @@ async def whatsapp_webhook(
             if len(_processed_wa_ids) > _WA_DEDUP_MAX:
                 _processed_wa_ids.popitem(last=False)  # evict oldest, O(1)
 
+        name = raw_message.get("name", "عميل")
         log.info("WhatsApp message received", phone=phone, length=len(text))
-        background_tasks.add_task(_handle_whatsapp_conversation, phone, text, chat_id)
+        background_tasks.add_task(_handle_whatsapp_conversation, phone, text, chat_id, name)
     else:
         log.debug("WhatsApp webhook received but no message extracted")
 
     return {"status": "received"}
 
 
-async def _handle_whatsapp_conversation(phone: str, text: str, chat_id: str = None):
-    """Route a WhatsApp message through the autonomous employee then reply via WhatsApp."""
+async def _handle_whatsapp_conversation(
+    phone: str,
+    text: str,
+    chat_id: str = None,
+    name: str = "عميل",
+):
+    """
+    Route an inbound WhatsApp message.
+    - If thread is escalated (owner handling) → ignore silently.
+    - If buying signal or complaint detected → escalate to owner, lock thread.
+    - Otherwise → auto-reply via Gemini.
+    """
+    import time
+    from channels.whatsapp import detect_escalation, build_escalation_telegram_message
+
     if not _employee:
         return
     reply_to = chat_id or phone
+
+    # ── 1. Check if thread is locked (owner is handling) ───────────────────────
+    expiry = _escalated_threads.get(phone, 0)
+    if expiry and time.time() < expiry:
+        logger.info("wa.thread_locked_skip", phone=phone)
+        return
+    if phone in _escalated_threads:
+        del _escalated_threads[phone]  # TTL expired, auto-unlock
+
     try:
+        # ── 2. Escalation detection ─────────────────────────────────────────────
+        escalation_type = detect_escalation(text)
+
+        if escalation_type:
+            # a) Acknowledge customer immediately
+            if _wa_notifier:
+                await _wa_notifier.send_custom_message(
+                    reply_to,
+                    "شكراً — سيتواصل معك فريقنا خلال دقائق",
+                )
+
+            # b) Alert owner on Telegram
+            if _tg_handler:
+                owner_ids = getattr(get_settings(), "TELEGRAM_OWNER_CHAT_IDS", []) or []
+                tg_msg = build_escalation_telegram_message(
+                    escalation_type=escalation_type,
+                    name=name,
+                    phone=phone,
+                    last_message=text,
+                )
+                for oid in owner_ids:
+                    try:
+                        await _tg_handler.send_message(str(oid), tg_msg)
+                    except Exception:
+                        pass
+
+            # c) Lock thread for 2 hours
+            import time as _t
+            _escalated_threads[phone] = _t.time() + _THREAD_LOCK_TTL_S
+            logger.info("wa.thread_escalated", phone=phone, type=escalation_type)
+
+            # Still track stage (message content matters)
+            await _auto_track_stage(phone=phone, message=text, role="lead")
+            return
+
+        # ── 3. Normal auto-reply ────────────────────────────────────────────────
         response = await _employee.handle_incoming_whatsapp(phone, text)
         logger.info("employee.responded", phone=phone, preview=response[:60])
         if response and _wa_notifier:
             await _wa_notifier.send_custom_message(reply_to, response)
 
-        # Auto stage tracking: lead message → move deal stage
         await _auto_track_stage(phone=phone, message=text, role="lead")
-        # Agent response → also track
         if response:
             await _auto_track_stage(phone=phone, message=response, role="agent")
 
     except Exception as exc:
         logger.error("employee.conversation_failed", phone=phone, error=str(exc))
+
+
+@app.post("/api/lead/unlock-thread", tags=["Leads"])
+async def unlock_thread(request: Request) -> dict:
+    """
+    Unlock an escalated thread so auto-reply resumes.
+    POST body: {"phone": "+966XXXXXXXXX"}
+    """
+    import time
+    body = await request.json()
+    phone = (body.get("phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="phone required")
+    was_locked = phone in _escalated_threads
+    _escalated_threads.pop(phone, None)
+    return {"unlocked": was_locked, "phone": phone, "auto_reply_resumed": True}
+
+
+@app.get("/api/lead/escalated-threads", tags=["Leads"])
+async def list_escalated_threads() -> dict:
+    """List currently locked threads (owner is handling these)."""
+    import time
+    now = time.time()
+    active = {
+        phone: {"expires_in_minutes": round((exp - now) / 60, 1)}
+        for phone, exp in _escalated_threads.items()
+        if exp > now
+    }
+    return {"escalated": active, "count": len(active)}
 
 
 async def _auto_track_stage(phone: str, message: str, role: str) -> None:
