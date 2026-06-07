@@ -740,7 +740,7 @@ async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipe
 
 
 @app.post("/api/content/social/generate", tags=["Content"])
-async def generate_social_content() -> dict:
+async def generate_social_content(settings: Settings = Depends(get_settings_dep)) -> dict:
     """Trigger weekly X + Instagram content generation and upload to Buffer."""
     if not _content_engine:
         raise HTTPException(status_code=503, detail="Content engine not initialized")
