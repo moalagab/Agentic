@@ -739,6 +739,47 @@ async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipe
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@app.post("/api/content/social/generate", tags=["Content"])
+async def generate_social_content() -> dict:
+    """Trigger weekly X + Instagram content generation and upload to Buffer."""
+    if not _content_engine:
+        raise HTTPException(status_code=503, detail="Content engine not initialized")
+    try:
+        pipeline_data = {}
+        if _pipeline:
+            try:
+                pipeline_data = await _pipeline.primary_crm.get_pipeline_stats()
+            except Exception:
+                pass
+        summary = await _content_engine.generate_and_upload_weekly_content(
+            buffer_token=getattr(settings, "BUFFER_ACCESS_TOKEN", ""),
+            x_channel_id=getattr(settings, "BUFFER_X_CHANNEL_ID", ""),
+            instagram_channel_id=getattr(settings, "BUFFER_INSTAGRAM_CHANNEL_ID", ""),
+            x_bearer_token=getattr(settings, "X_BEARER_TOKEN", ""),
+            pipeline_data=pipeline_data,
+        )
+        # Notify owner on Telegram
+        total = summary.get("x_posts", 0) + summary.get("ig_reels", 0) + summary.get("ig_posts", 0)
+        msg = (
+            f"✅ *محتوى السوشيال جاهز*\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"X: {summary.get('x_posts', 0)} تغريدة\n"
+            f"Instagram Reels: {summary.get('ig_reels', 0)}\n"
+            f"Instagram Posts: {summary.get('ig_posts', 0)}\n"
+            f"Buffer uploads: {summary.get('buffer_uploads', 0)}\n"
+            f"ترندات Google: {', '.join(summary.get('google_trends_used', []))}\n"
+            f"أخبار الصناعة: {summary.get('industry_news_count', 0)} خبر"
+        )
+        if _tg_handler:
+            owner_ids = [str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])]
+            for chat_id in owner_ids:
+                await _tg_handler.send_message(chat_id, msg)
+        return {"success": True, "summary": summary, "total_pieces": total}
+    except Exception as exc:
+        logger.error("social_content_generation_failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
 @app.post("/api/content/objection", tags=["Content"])
 async def handle_objection(body: dict) -> dict:
     """Generate a sales script for handling a specific objection."""
