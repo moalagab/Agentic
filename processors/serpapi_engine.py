@@ -1,6 +1,7 @@
 """
-SerpAPI Prospecting Engine — Google Maps local results via SerpAPI
-مصدر ثانٍ للتنقيب بجانب Outscraper — يستخدم SerpAPI لاستخراج أماكن Google Maps
+SerpAPI Engine — Google Maps prospecting + Content Intelligence
+- مصدر ثانٍ للتنقيب: Google Maps local results
+- ذكاء المحتوى: Saudi Google Trends + أخبار صناعة Cold Chain
 """
 
 from __future__ import annotations
@@ -233,3 +234,136 @@ async def run_serpapi_prospecting(
             logger.warning(f"SerpAPI notify error: {exc}")
 
     return all_results
+
+
+# ─── Content Intelligence (SerpAPI for Social Media) ──────────────────────────
+
+_INDUSTRY_NEWS_QUERIES = [
+    "نقل مبرد السعودية",
+    "Cold Chain لوجستيات الرياض",
+    "أغذية فاخرة سلسلة التوريد السعودية",
+]
+
+_SAUDI_FOOD_TREND_QUERIES = [
+    "مطاعم الرياض 2025",
+    "محامص قهوة متخصصة السعودية",
+    "مطابخ سحابية الرياض",
+]
+
+
+async def fetch_saudi_google_trends(api_key: str, max_results: int = 5) -> list[str]:
+    """
+    جلب الموضوعات الرائجة على Google في السعودية — engine: google_trends_trending_now
+    Returns list of trending topic strings.
+    """
+    if not api_key:
+        return []
+    params = {
+        "engine": "google_trends_trending_now",
+        "frequency": "daily",
+        "geo": "SA",
+        "hl": "ar",
+        "api_key": api_key,
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            resp = await client.get(SERPAPI_URL, params=params)
+            if resp.status_code != 200:
+                logger.warning(f"SerpAPI trends {resp.status_code}: {resp.text[:120]}")
+                return []
+            data = resp.json()
+            trending = data.get("trending_searches", [])
+            topics: list[str] = []
+            for item in trending[:max_results]:
+                q = item.get("query", {})
+                topic = q.get("query", "") if isinstance(q, dict) else str(q)
+                if topic:
+                    topics.append(topic)
+            logger.info(f"SerpAPI trends: fetched {len(topics)} Saudi topics")
+            return topics
+        except Exception as exc:
+            logger.error(f"SerpAPI trends error: {exc}")
+            return []
+
+
+async def fetch_industry_news(api_key: str, max_results: int = 4) -> list[dict]:
+    """
+    جلب أخبار صناعة Cold Chain والأغذية في السعودية — engine: google_news
+    Returns list of {title, source, date} dicts.
+    """
+    if not api_key:
+        return []
+
+    all_news: list[dict] = []
+    queries = _INDUSTRY_NEWS_QUERIES[:2]
+
+    fetch_tasks = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for query in queries:
+            params = {
+                "engine": "google_news",
+                "q": query,
+                "gl": "sa",
+                "hl": "ar",
+                "api_key": api_key,
+            }
+            try:
+                resp = await client.get(SERPAPI_URL, params=params)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                for item in data.get("news_results", [])[:3]:
+                    source = item.get("source", {})
+                    all_news.append({
+                        "title": item.get("title", ""),
+                        "source": source.get("name", "") if isinstance(source, dict) else str(source),
+                        "date": item.get("date", ""),
+                    })
+            except Exception as exc:
+                logger.error(f"SerpAPI news error [{query}]: {exc}")
+
+    unique: list[dict] = []
+    seen_titles: set[str] = set()
+    for item in all_news:
+        title = item.get("title", "")
+        if title and title not in seen_titles:
+            seen_titles.add(title)
+            unique.append(item)
+
+    logger.info(f"SerpAPI news: fetched {len(unique)} industry headlines")
+    return unique[:max_results]
+
+
+async def fetch_food_trends(api_key: str, max_results: int = 3) -> list[str]:
+    """
+    جلب نتائج بحث عن ترندات الأغذية والمطاعم السعودية — engine: google
+    يُستخدم لتغذية الـ AI بثقافة السوق الحالية.
+    """
+    if not api_key:
+        return []
+
+    results: list[str] = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        for query in _SAUDI_FOOD_TREND_QUERIES[:2]:
+            params = {
+                "engine": "google",
+                "q": query,
+                "gl": "sa",
+                "hl": "ar",
+                "num": 5,
+                "api_key": api_key,
+            }
+            try:
+                resp = await client.get(SERPAPI_URL, params=params)
+                if resp.status_code != 200:
+                    continue
+                data = resp.json()
+                for r in data.get("organic_results", [])[:2]:
+                    snippet = r.get("snippet", "") or r.get("title", "")
+                    if snippet:
+                        results.append(snippet[:120])
+            except Exception as exc:
+                logger.error(f"SerpAPI food trends error [{query}]: {exc}")
+
+    logger.info(f"SerpAPI food trends: fetched {len(results)} snippets")
+    return results[:max_results]

@@ -168,7 +168,10 @@ async def lifespan(app: FastAPI):
     _cpq_engine = CPQEngine()
     log.info("CPQ engine initialized")
 
-    _content_engine = ContentEngine(gemini_api_key=settings.GEMINI_API_KEY)
+    _content_engine = ContentEngine(
+        gemini_api_key=settings.GEMINI_API_KEY,
+        serpapi_api_key=getattr(settings, "SERPAPI_KEY", ""),
+    )
     log.info("Content engine initialized")
 
     if settings.is_supabase_configured():

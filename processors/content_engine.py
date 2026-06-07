@@ -205,10 +205,12 @@ class ContentEngine:
     """
     AI-powered content generation engine.
     يولّد محتوى أسبوعي لـ X وInstagram ويرفعه على Buffer كـ drafts.
+    يستخدم SerpAPI (اختياري) لجلب Saudi Google Trends وأخبار Cold Chain كسياق إضافي.
     """
 
-    def __init__(self, gemini_api_key: str) -> None:
+    def __init__(self, gemini_api_key: str, serpapi_api_key: str = "") -> None:
         self.api_key = gemini_api_key
+        self.serpapi_key = serpapi_api_key
         self._log = logger.bind(component="ContentEngine")
 
     # ── Weekly Social Content (NEW — Buffer integration) ────────────────────────
@@ -231,10 +233,38 @@ class ContentEngine:
         """
         self._log.info("content.weekly_generation_start")
 
-        # Context gathering
+        # Context gathering — X Trends + SerpAPI + Saudi Calendar
         trends = await _get_x_trending(x_bearer_token)
         occasions = _get_upcoming_occasions(days_ahead=14)
-        context = self._build_context(trends, occasions, pipeline_data)
+
+        google_trends: list[str] = []
+        industry_news: list[dict] = []
+        food_snippets: list[str] = []
+        if self.serpapi_key:
+            from processors.serpapi_engine import (
+                fetch_saudi_google_trends,
+                fetch_industry_news,
+                fetch_food_trends,
+            )
+            google_trends, industry_news, food_snippets = await asyncio.gather(
+                fetch_saudi_google_trends(self.serpapi_key),
+                fetch_industry_news(self.serpapi_key),
+                fetch_food_trends(self.serpapi_key),
+                return_exceptions=False,
+            )
+            self._log.info(
+                "content.serpapi_context_fetched",
+                google_trends=len(google_trends),
+                news=len(industry_news),
+                snippets=len(food_snippets),
+            )
+
+        context = self._build_context(
+            trends, occasions, pipeline_data,
+            google_trends=google_trends,
+            industry_news=industry_news,
+            food_snippets=food_snippets,
+        )
 
         # Generate content in parallel
         x_posts_task = self._generate_x_posts(7, context)
@@ -251,6 +281,8 @@ class ContentEngine:
             "ig_posts": len(ig_posts),
             "buffer_uploads": 0,
             "trends_used": trends[:3],
+            "google_trends_used": google_trends[:3],
+            "industry_news_count": len(industry_news),
             "occasions_used": occasions,
         }
 
@@ -278,16 +310,40 @@ class ContentEngine:
         trends: list[str],
         occasions: list[str],
         pipeline_data: Optional[dict],
+        google_trends: Optional[list[str]] = None,
+        industry_news: Optional[list[dict]] = None,
+        food_snippets: Optional[list[str]] = None,
     ) -> str:
         parts = []
+
+        # X Trending
         if trends:
-            parts.append(f"الترندات السعودية: {', '.join(trends[:3])}")
+            parts.append(f"ترندات X السعودية: {', '.join(trends[:3])}")
+
+        # Google Trends (SerpAPI)
+        if google_trends:
+            parts.append(f"ترندات Google السعودية: {', '.join(google_trends[:3])}")
+
+        # Industry News (SerpAPI)
+        if industry_news:
+            headlines = [n.get("title", "") for n in industry_news[:2] if n.get("title")]
+            if headlines:
+                parts.append(f"أخبار الصناعة: {' / '.join(headlines)}")
+
+        # Food & Restaurant Trends (SerpAPI)
+        if food_snippets:
+            parts.append(f"ترندات السوق: {food_snippets[0][:100]}")
+
+        # Saudi Occasions
         if occasions:
             parts.append(f"مناسبات قادمة: {', '.join(occasions)}")
+
+        # Pipeline Data
         if pipeline_data:
             total = pipeline_data.get("total_leads", 0)
             if total:
                 parts.append(f"لدينا {total} عميل محتمل هذا الأسبوع")
+
         return " | ".join(parts) if parts else "أسبوع عمل عادي"
 
     # ── X (Twitter) Posts ───────────────────────────────────────────────────────
