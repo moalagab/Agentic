@@ -88,11 +88,12 @@ async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> 
     - async=false لاستقبال النتائج فوراً
     """
     params = {
-        "query": query,
-        "limit": limit,
-        "async": "false",
-        "language": "ar",
-        "region": "SA",
+        "query":       query,
+        "limit":       limit,
+        "async":       "false",
+        "language":    "ar",
+        "region":      "SA",
+        "coordinates": "24.7136,46.6753",   # pin to Riyadh city center
     }
 
     async with httpx.AsyncClient(timeout=60) as client:

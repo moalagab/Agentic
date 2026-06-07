@@ -36,20 +36,24 @@ SERPAPI_QUERIES = [
 ]
 
 
+# Riyadh city center coordinates — zoom 12 covers ~40km radius
+_RIYADH_LL = "@24.7136,46.6753,12z"
+
 async def fetch_places_serpapi(
     query: str,
     api_key: str,
     limit: int = 20,
 ) -> list[dict]:
-    """Fetch Google Maps local results via SerpAPI."""
+    """Fetch Google Maps local results via SerpAPI — pinned to Riyadh."""
     params = {
-        "engine":    "google_maps",
-        "q":         query,
-        "hl":        "ar",
-        "gl":        "sa",
-        "type":      "search",
-        "api_key":   api_key,
-        "num":       limit,
+        "engine":   "google_maps",
+        "q":        query,
+        "hl":       "ar",
+        "gl":       "sa",
+        "ll":       _RIYADH_LL,   # pin to Riyadh lat/lng
+        "type":     "search",
+        "api_key":  api_key,
+        "num":      limit,
     }
 
     async with httpx.AsyncClient(timeout=45) as client:
