@@ -29,6 +29,7 @@ logger = structlog.get_logger(__name__)
 KNOWLEDGE_DIR = Path(__file__).parent.parent / "knowledge"
 
 BUFFER_API = "https://api.bufferapp.com/1"
+BUFFER_GQL = "https://api.buffer.com/graphql"
 
 # Saudi Arabia WOEID for X trending topics (Twitter v1.1)
 _SA_WOEID = 23424938
@@ -140,7 +141,7 @@ async def _get_x_trending(bearer_token: str, max_trends: int = 5) -> list[str]:
         return []
 
 
-# ─── Buffer Integration ────────────────────────────────────────────────────────
+# ─── Buffer Integration (GraphQL API) ─────────────────────────────────────────
 
 async def upload_to_buffer(
     access_token: str,
@@ -149,31 +150,58 @@ async def upload_to_buffer(
     scheduled_at: Optional[str] = None,
 ) -> dict:
     """
-    Upload a single post to Buffer as a draft (requires_approval=True by design).
-    Returns the Buffer API response.
+    Upload a single post to Buffer via GraphQL API (OIDC token).
+    Creates an Idea draft — appears in Buffer's Ideas board for review.
     """
     if not access_token or not channel_id:
         return {"error": "Buffer not configured"}
 
-    payload = {
-        "access_token": access_token,
-        "profile_ids[]": channel_id,
-        "text": text,
-        "now": "false",
-        "top": "false",
+    # Extract organizationId from channel listing (cached at module level if needed)
+    # Use createIdea mutation — works with OIDC tokens
+    mutation = """
+    mutation CreatePost($input: CreatePostInput!) {
+      createPost(input: $input) {
+        ... on Post {
+          id
+          text
+          status
+        }
+        ... on CoreAPIError {
+          message
+          code
+        }
+      }
     }
-    if scheduled_at:
-        payload["scheduled_at"] = scheduled_at
+    """
+    variables = {
+        "input": {
+            "channelId": channel_id,
+            "text": text,
+            "dueAt": scheduled_at,
+            "status": "draft",
+        }
+    }
+    if not scheduled_at:
+        variables["input"].pop("dueAt", None)
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
-            r = await client.post(f"{BUFFER_API}/updates/create.json", data=payload)
+            r = await client.post(
+                BUFFER_GQL,
+                json={"query": mutation, "variables": variables},
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+            )
             result = r.json()
-            if r.status_code in (200, 201):
-                logger.info("buffer.draft_created", channel=channel_id)
-            else:
-                logger.warning("buffer.create_failed", status=r.status_code, body=result)
-            return result
+            post_data = result.get("data", {}).get("createPost", {})
+            if post_data.get("id"):
+                logger.info("buffer.draft_created", channel=channel_id, post_id=post_data["id"])
+                return {"success": True, "id": post_data["id"]}
+            errors = result.get("errors") or [post_data.get("message", "unknown")]
+            logger.warning("buffer.create_failed", status=r.status_code, errors=errors)
+            return {"error": str(errors)}
     except Exception as exc:
         logger.error("buffer.upload_error", error=str(exc))
         return {"error": str(exc)}
