@@ -56,6 +56,7 @@ from processors.customer_success import CustomerSuccessEngine
 from processors.learning_loop import LearningLoop
 from processors.outbound_sender import OutboundSender
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
+from dashboard.leads_admin import render_leads_admin
 
 logger = structlog.get_logger(__name__)
 
@@ -395,6 +396,62 @@ async def get_analytics(
     except Exception as exc:
         logger.error("Failed to get analytics", error=str(exc))
         return {"success": False, "error": str(exc), "stats": {}}
+
+
+@app.get("/admin/leads", tags=["Admin"], response_class=Response)
+async def admin_leads_page(
+    search: str = Query(default=""),
+    stage: str  = Query(default=""),
+) -> Response:
+    """
+    Lead management admin page — لوحة إدارة العملاء يدوياً.
+    Supports search, stage filter, edit, delete.
+    """
+    try:
+        settings = get_settings()
+        leads = []
+        if settings.is_supabase_configured():
+            from supabase import create_client
+            sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+            q = sb.table("leads").select("*").order("created_at", desc=True).limit(500)
+            leads = q.execute().data or []
+        html = render_leads_admin(leads, search=search, stage_filter=stage)
+        return Response(content=html, media_type="text/html; charset=utf-8")
+    except Exception as exc:
+        logger.error("Admin leads page failed", error=str(exc))
+        return Response(content=f"<h1>Error</h1><pre>{exc}</pre>", media_type="text/html")
+
+
+@app.post("/api/lead/{lead_id}/update", tags=["Leads"])
+async def update_lead_fields(lead_id: str, body: dict) -> dict:
+    """Update arbitrary lead fields (notes, priority, revenue, etc.)."""
+    try:
+        settings = get_settings()
+        if not settings.is_supabase_configured():
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+        from supabase import create_client
+        from datetime import datetime as _dt
+        sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        body["updated_at"] = _dt.utcnow().isoformat()
+        sb.table("leads").update(body).eq("id", lead_id).execute()
+        return {"success": True, "lead_id": lead_id, "updated": list(body.keys())}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.delete("/api/lead/{lead_id}", tags=["Leads"])
+async def delete_lead(lead_id: str) -> dict:
+    """Delete a lead by ID."""
+    try:
+        settings = get_settings()
+        if not settings.is_supabase_configured():
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+        from supabase import create_client
+        sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        sb.table("leads").delete().eq("id", lead_id).execute()
+        return {"success": True, "lead_id": lead_id}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/dashboard", tags=["Dashboard"], response_class=Response)
@@ -972,8 +1029,42 @@ async def _handle_whatsapp_conversation(phone: str, text: str, chat_id: str = No
         logger.info("employee.responded", phone=phone, preview=response[:60])
         if response and _wa_notifier:
             await _wa_notifier.send_custom_message(reply_to, response)
+
+        # Auto stage tracking: lead message → move deal stage
+        await _auto_track_stage(phone=phone, message=text, role="lead")
+        # Agent response → also track
+        if response:
+            await _auto_track_stage(phone=phone, message=response, role="agent")
+
     except Exception as exc:
         logger.error("employee.conversation_failed", phone=phone, error=str(exc))
+
+
+async def _auto_track_stage(phone: str, message: str, role: str) -> None:
+    """Lookup lead by phone and auto-advance deal_stage based on message content."""
+    if not _pipeline:
+        return
+    try:
+        from processors.stage_tracker import track_stage_on_message
+        from crm.supabase_crm import SupabaseCRM
+        crm = _pipeline.primary_crm
+        if not isinstance(crm, SupabaseCRM):
+            return
+        lead = await crm.search_lead(phone=phone)
+        if not lead:
+            return
+        current_stage = str(getattr(lead, "deal_stage", None) or lead.__dict__.get("deal_stage", "NEW_LEAD"))
+        lead_score = int(lead.score or 0)
+        await track_stage_on_message(
+            lead_id=lead.id,
+            message=message,
+            role=role,
+            lead_score=lead_score,
+            current_stage=current_stage,
+            crm=crm,
+        )
+    except Exception as exc:
+        logger.debug("stage_tracker skipped", error=str(exc))
 
 
 # ── Telegram Webhook ────────────────────────────────────────────────────────────
@@ -1154,6 +1245,112 @@ async def website_webhook(
         logger.debug("Website webhook received but no lead extracted")
 
     return {"status": "received"}
+
+
+# ── smartfield.sa Website Contact Form ────────────────────────────────────────
+
+class WebsiteLeadRequest(BaseModel):
+    """Maps the smartfield.sa contact form fields."""
+    full_name:         str            = Field(..., min_length=2)
+    company:           Optional[str]  = None
+    email:             Optional[str]  = None
+    phone:             Optional[str]  = None
+    pickup_city:       Optional[str]  = None
+    delivery_city:     Optional[str]  = None
+    temperature_range: Optional[str]  = None   # frozen/chilled/cool/ambient
+    load_size:         Optional[str]  = None
+    notes:             Optional[str]  = None
+    # Honeypot / CSRF fields — ignored
+    website:           Optional[str]  = None
+
+
+@app.post("/webhook/website-form", tags=["Webhooks"])
+async def website_form_webhook(
+    req: WebsiteLeadRequest,
+    background_tasks: BackgroundTasks,
+    pipeline: LeadPipeline = Depends(get_pipeline),
+) -> dict:
+    """
+    Receive contact form submissions from https://www.smartfield.sa/
+    يستقبل نماذج التواصل من الموقع الإلكتروني.
+
+    Configure the website to POST to: https://agent.smartfield.sa/webhook/website-form
+    """
+    log = logger.bind(endpoint="/webhook/website-form", name=req.full_name)
+
+    # Block honeypot spam
+    if req.website:
+        return {"status": "ignored"}
+
+    if not req.phone and not req.email:
+        raise HTTPException(status_code=422, detail="phone or email required")
+
+    # Map temperature_range to cargo_type
+    temp_map = {
+        "frozen":  "مجمّد (Frozen)",
+        "chilled": "مبرد (Chilled)",
+        "cool":    "بارد (Cool)",
+        "ambient": "درجة حرارة عادية",
+    }
+    cargo = temp_map.get(str(req.temperature_range or "").lower(), req.temperature_range)
+
+    notes_parts = []
+    if req.load_size:
+        notes_parts.append(f"حجم الحمولة: {req.load_size}")
+    if req.notes:
+        notes_parts.append(req.notes)
+
+    try:
+        lead_create = LeadCreate(
+            name=req.full_name,
+            company=req.company,
+            phone=req.phone,
+            email=req.email,
+            source=LeadSource.WEBSITE,
+            cargo_type=cargo,
+            route_from=req.pickup_city,
+            route_to=req.delivery_city,
+            notes="; ".join(notes_parts) if notes_parts else None,
+            raw_data={
+                "website_form":      True,
+                "temperature_range": req.temperature_range,
+                "load_size":         req.load_size,
+                "origin":            "smartfield.sa",
+            },
+        )
+    except Exception as exc:
+        log.warning("Website form parse error", error=str(exc))
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    log.info("Website lead received", name=req.full_name)
+    background_tasks.add_task(_run_pipeline, lead_create, pipeline)
+    return {"status": "received", "message": "شكراً، سنتواصل معك قريباً"}
+
+
+@app.post("/api/weekly-report/send", tags=["Reports"])
+async def send_weekly_report_now() -> dict:
+    """Manually trigger the weekly Telegram report."""
+    try:
+        settings = get_settings()
+        from employee.report_generator import build_weekly_report_from_supabase
+        if not settings.is_supabase_configured():
+            raise HTTPException(status_code=503, detail="Supabase not configured")
+        report = await build_weekly_report_from_supabase(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+
+        sent_to = []
+        if _tg_handler and settings.TELEGRAM_OWNER_CHAT_IDS:
+            for chat_id in settings.TELEGRAM_OWNER_CHAT_IDS:
+                await _tg_handler.send_message(str(chat_id), report)
+                sent_to.append(f"telegram:{chat_id}")
+        elif _wa_notifier and settings.SALES_TEAM_WHATSAPP:
+            for phone in settings.SALES_TEAM_WHATSAPP:
+                await _wa_notifier.send_custom_message(phone, report)
+                sent_to.append(f"whatsapp:{phone}")
+
+        return {"success": True, "sent_to": sent_to, "preview": report[:200]}
+    except Exception as exc:
+        logger.error("Weekly report send failed", error=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 # ── Meta/Google Ads Lead Forms Webhook ─────────────────────────────────────────

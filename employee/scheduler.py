@@ -176,7 +176,17 @@ class SmartfieldScheduler:
             misfire_grace_time=600,
         )
 
-        logger.info("scheduler.jobs_registered", count=10)
+        # SerpAPI prospecting — every day at 8:45 AM (diversified source)
+        self.scheduler.add_job(
+            self._run_serpapi_prospecting,
+            CronTrigger(hour=8, minute=45, timezone=RIYADH_TZ),
+            id="serpapi_prospecting",
+            name="البحث عن عملاء — SerpAPI",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        logger.info("scheduler.jobs_registered", count=11)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -198,11 +208,26 @@ class SmartfieldScheduler:
     async def _run_weekly_report(self):
         logger.info("scheduler.running_weekly_report")
         try:
-            from employee.report_generator import build_weekly_report
-            stats = await self.employee._get_pipeline_stats()
-            report = build_weekly_report(stats)
-            for phone in self.employee._owner_phones:
-                await self.employee._send_whatsapp(phone, report)
+            from employee.report_generator import build_weekly_report_from_supabase
+            config = self.employee.config
+            if getattr(config, "SUPABASE_URL", "") and getattr(config, "SUPABASE_KEY", ""):
+                report = await build_weekly_report_from_supabase(
+                    config.SUPABASE_URL, config.SUPABASE_KEY
+                )
+            else:
+                from employee.report_generator import build_weekly_report
+                stats = await self.employee._get_pipeline_stats()
+                report = build_weekly_report(stats)
+
+            # Send via Telegram first (preferred), then WhatsApp
+            if self.employee.telegram and self.employee._owner_telegram_ids:
+                for chat_id in self.employee._owner_telegram_ids:
+                    await self.employee.telegram.send_message(chat_id, report)
+                logger.info("scheduler.weekly_report_sent_telegram")
+            else:
+                for phone in self.employee._owner_phones:
+                    await self.employee._send_whatsapp(phone, report)
+                logger.info("scheduler.weekly_report_sent_whatsapp")
         except Exception as exc:
             logger.error("scheduler.weekly_report_error", error=str(exc))
 
@@ -354,6 +379,49 @@ class SmartfieldScheduler:
 
         except Exception as exc:
             logger.error("scheduler.google_maps_prospecting_error", error=str(exc))
+
+    async def _run_serpapi_prospecting(self):
+        """
+        يبحث عبر SerpAPI كمصدر ثانٍ للتنقيب بجانب Outscraper.
+        يعمل 8:45 ص يومياً.
+        """
+        logger.info("scheduler.running_serpapi_prospecting")
+
+        config = self.employee.config
+        if not getattr(config, "SERPAPI_KEY", ""):
+            logger.debug("scheduler.serpapi_skipped", reason="SERPAPI_KEY not configured")
+            return
+
+        if not self.pipeline:
+            logger.warning("scheduler.serpapi_skipped", reason="pipeline not set")
+            return
+
+        crm = getattr(self.pipeline, "primary_crm", None)
+        if not crm:
+            return
+
+        try:
+            from processors.serpapi_engine import run_serpapi_prospecting
+
+            async def notify(message: str):
+                if self.employee.telegram and self.employee._owner_telegram_ids:
+                    for chat_id in self.employee._owner_telegram_ids:
+                        await self.employee.telegram.send_message(chat_id, message)
+                else:
+                    for phone in self.employee._owner_phones:
+                        await self.employee._send_whatsapp(phone, message)
+
+            results = await run_serpapi_prospecting(
+                api_key=config.SERPAPI_KEY,
+                gemini_api_key=getattr(config, "GEMINI_API_KEY", ""),
+                crm=crm,
+                notify_callback=notify,
+                max_queries=4,
+            )
+            logger.info("scheduler.serpapi_prospecting_complete", new_leads=len(results))
+
+        except Exception as exc:
+            logger.error("scheduler.serpapi_prospecting_error", error=str(exc))
 
     async def _run_content_plan(self):
         """Generate weekly content plan and send to owner (Layer 7)."""

@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # ─── Outscraper (Google Maps data) ───────────────────────────────────────
     OUTSCRAPER_API_KEY: str = Field(default="", description="Outscraper API key — outscraper.com")
 
+    # ─── SerpAPI (Google Maps / Search results) ───────────────────────────────
+    SERPAPI_KEY: str = Field(default="", description="SerpAPI key — serpapi.com — used for Google Maps local results")
+
     # ─── Gemini (Claude fallback) ─────────────────────────────────────────────
     GEMINI_API_KEY: str = Field(default="", description="Google Gemini API key — aistudio.google.com")
 
@@ -150,6 +153,9 @@ class Settings(BaseSettings):
     @property
     def whatsapp_api_url(self) -> str:
         return f"https://graph.facebook.com/v18.0/{self.WHATSAPP_PHONE_ID}/messages"
+
+    def is_serpapi_configured(self) -> bool:
+        return bool(self.SERPAPI_KEY)
 
     def is_supabase_configured(self) -> bool:
         return bool(self.SUPABASE_URL and self.SUPABASE_KEY)
