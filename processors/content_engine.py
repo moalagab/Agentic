@@ -156,33 +156,25 @@ async def upload_to_buffer(
     if not access_token or not channel_id:
         return {"error": "Buffer not configured"}
 
-    # Extract organizationId from channel listing (cached at module level if needed)
-    # Use createIdea mutation — works with OIDC tokens
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
       createPost(input: $input) {
-        ... on Post {
-          id
-          text
-          status
-        }
-        ... on CoreAPIError {
-          message
-          code
+        ... on PostActionSuccess {
+          post { id status }
         }
       }
     }
     """
-    variables = {
+    variables: dict = {
         "input": {
             "channelId": channel_id,
             "text": text,
-            "dueAt": scheduled_at,
-            "status": "draft",
+            "schedulingType": "automatic",
+            "mode": "addToQueue" if not scheduled_at else "customScheduled",
         }
     }
-    if not scheduled_at:
-        variables["input"].pop("dueAt", None)
+    if scheduled_at:
+        variables["input"]["dueAt"] = scheduled_at
 
     try:
         async with httpx.AsyncClient(timeout=20) as client:
@@ -195,12 +187,12 @@ async def upload_to_buffer(
                 },
             )
             result = r.json()
-            post_data = result.get("data", {}).get("createPost", {})
+            post_data = result.get("data", {}).get("createPost", {}).get("post", {})
             if post_data.get("id"):
-                logger.info("buffer.draft_created", channel=channel_id, post_id=post_data["id"])
+                logger.info("buffer.post_queued", channel=channel_id, post_id=post_data["id"])
                 return {"success": True, "id": post_data["id"]}
-            errors = result.get("errors") or [post_data.get("message", "unknown")]
-            logger.warning("buffer.create_failed", status=r.status_code, errors=errors)
+            errors = result.get("errors", [{"message": "unknown"}])
+            logger.warning("buffer.create_failed", errors=errors)
             return {"error": str(errors)}
     except Exception as exc:
         logger.error("buffer.upload_error", error=str(exc))
