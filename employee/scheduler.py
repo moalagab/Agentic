@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from processors.outbound_sender import OutboundSender
     from processors.followup_engine import CreativeFollowupEngine
     from processors.contract_converter import ContractConverter
+    from processors.waha_monitor import WAHAMonitor
 
 logger = structlog.get_logger(__name__)
 
@@ -60,6 +61,7 @@ class SmartfieldScheduler:
         outbound_sender: "Optional[OutboundSender]" = None,
         creative_followup_engine: "Optional[CreativeFollowupEngine]" = None,
         contract_converter: "Optional[ContractConverter]" = None,
+        waha_monitor: "Optional[WAHAMonitor]" = None,
     ):
         self.employee = employee
         self.pipeline = pipeline
@@ -70,6 +72,7 @@ class SmartfieldScheduler:
         self.outbound_sender = outbound_sender
         self.creative_followup_engine = creative_followup_engine
         self.contract_converter = contract_converter
+        self.waha_monitor = waha_monitor
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -215,7 +218,17 @@ class SmartfieldScheduler:
             misfire_grace_time=300,
         )
 
-        logger.info("scheduler.jobs_registered", count=11)
+        # WAHA health check — every 5 minutes
+        self.scheduler.add_job(
+            self._run_waha_health_check,
+            CronTrigger(minute="*/5", timezone=RIYADH_TZ),
+            id="waha_health_check",
+            name="مراقبة اتصال واتساب",
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+
+        logger.info("scheduler.jobs_registered", count=12)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -547,3 +560,14 @@ class SmartfieldScheduler:
         if should_run:
             logger.info("scheduler.startup_content_running", reason="no run in last 7 days")
             await self._run_content_plan()
+
+    async def _run_waha_health_check(self):
+        """Monitor WhatsApp session and auto-reconnect on failure."""
+        if not self.waha_monitor:
+            return
+        try:
+            status = await self.waha_monitor.check_and_reconnect()
+            if status not in ("CONNECTED", "STARTING", "SCAN_QR_CODE"):
+                logger.warning("scheduler.waha_unexpected_status", status=status)
+        except Exception as exc:
+            logger.error("scheduler.waha_health_check_error", error=str(exc))

@@ -56,6 +56,7 @@ from processors.content_engine import ContentEngine
 from processors.customer_success import CustomerSuccessEngine
 from processors.learning_loop import LearningLoop
 from processors.outbound_sender import OutboundSender
+from processors.waha_monitor import WAHAMonitor
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 from dashboard.leads_admin import render_leads_admin
 
@@ -82,6 +83,7 @@ _learning_loop: Optional[LearningLoop] = None
 _outbound_sender: Optional[OutboundSender] = None
 _creative_followup: Optional[CreativeFollowupEngine] = None
 _contract_converter: Optional[ContractConverter] = None
+_waha_monitor: Optional[WAHAMonitor] = None
 
 # Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
 _processed_wa_ids: OrderedDict[str, None] = OrderedDict()
@@ -209,6 +211,15 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("RevOS v6 engines init partial", error=str(exc))
 
+    # Initialize WAHA monitor for permanent WhatsApp connection
+    _waha_monitor = WAHAMonitor(
+        waha_url=getattr(settings, "WAHA_URL", "http://localhost:3000"),
+        api_key=getattr(settings, "WAHA_API_KEY", ""),
+        session=getattr(settings, "WAHA_SESSION", "default"),
+        telegram=_tg_handler,
+        owner_chat_ids=_owner_ids,
+    )
+
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
     _scheduler = SmartfieldScheduler(
         _employee,
@@ -220,6 +231,7 @@ async def lifespan(app: FastAPI):
         outbound_sender=_outbound_sender,
         creative_followup_engine=_creative_followup,
         contract_converter=_contract_converter,
+        waha_monitor=_waha_monitor,
     )
     _scheduler.start()
 
