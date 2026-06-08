@@ -128,6 +128,8 @@ class Settings(BaseSettings):
 
     # ─── X (Twitter) API ─────────────────────────────────────────────────────
     X_BEARER_TOKEN: str = Field(default="", description="X API v2 Bearer Token — for trending topics")
+    X_ACCESS_TOKEN: str = Field(default="", description="X OAuth 1.0a Access Token — for posting as user")
+    X_ACCESS_TOKEN_SECRET: str = Field(default="", description="X OAuth 1.0a Access Token Secret")
 
     # ─── Optional: Meta Ads webhook secret ───────────────────────────────────
     META_ADS_VERIFY_TOKEN: str = Field(

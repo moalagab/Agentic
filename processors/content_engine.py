@@ -163,22 +163,34 @@ def _get_upcoming_occasions(days_ahead: int = 14) -> list[str]:
 async def _get_x_trending(bearer_token: str, max_trends: int = 5) -> list[str]:
     """Fetch Saudi trending topics via X API v1.1."""
     if not bearer_token:
+        logger.debug("x_trends.skipped", reason="no bearer token")
         return []
     url = f"https://api.twitter.com/1.1/trends/place.json?id={_SA_WOEID}"
     headers = {"Authorization": f"Bearer {bearer_token}"}
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             r = await client.get(url, headers=headers)
+            if r.status_code == 401:
+                logger.warning(
+                    "x_trends.unauthorized",
+                    hint="Bearer Token invalid/expired or Free tier (no read access). "
+                         "Regenerate at developer.twitter.com or upgrade to Basic tier. "
+                         "Using Google Trends (SerpAPI) as fallback.",
+                )
+                return []
             if r.status_code != 200:
                 logger.warning("x_trends.failed", status=r.status_code)
                 return []
             data = r.json()
-            trends = data[0].get("trends", []) if data else []
-            # Filter: skip Twitter internal trends (#xxx or empty names)
+            if isinstance(data, dict) and "errors" in data:
+                logger.warning("x_trends.api_error", errors=data["errors"])
+                return []
+            trends = data[0].get("trends", []) if isinstance(data, list) and data else []
             names = [
                 t["name"] for t in trends
-                if t.get("name") and not t["name"].startswith("#") or len(t["name"]) > 3
+                if t.get("name") and (not t["name"].startswith("#") or len(t["name"]) > 3)
             ]
+            logger.info("x_trends.ok", count=len(names))
             return names[:max_trends]
     except Exception as exc:
         logger.warning("x_trends.error", error=str(exc))
