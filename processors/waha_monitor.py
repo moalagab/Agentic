@@ -60,7 +60,7 @@ class WAHAMonitor:
         status = await self._get_status()
         self._log.debug("waha.health_check", status=status)
 
-        if status == "CONNECTED":
+        if status in ("CONNECTED", "WORKING"):
             return status
 
         if status == "STARTING":

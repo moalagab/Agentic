@@ -568,7 +568,7 @@ class SmartfieldScheduler:
             return
         try:
             status = await self.waha_monitor.check_and_reconnect()
-            if status not in ("CONNECTED", "STARTING", "SCAN_QR_CODE"):
+            if status not in ("CONNECTED", "WORKING", "STARTING", "SCAN_QR_CODE"):
                 logger.warning("scheduler.waha_unexpected_status", status=status)
         except Exception as exc:
             logger.error("scheduler.waha_health_check_error", error=str(exc))
