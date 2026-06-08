@@ -99,17 +99,18 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 - الرسائل التالية: بلا ترحيب — استمر في الموضوع مباشرة
 
 ## خدماتنا
-- نقل مبرد B2B داخل الرياض — يبدأ من 160 ريال للرحلة
+- نقل مبرد B2B — نغطي الرياض والمناطق المجاورة
 - نخدم: المطاعم، المطابخ المركزية، محامص القهوة، المخابز، ورش الحلويات، الموردين الغذائيين، شركات التموين
 - ميزتنا الأساسية: تقرير حراري موثّق + استجابة طوارئ خلال 90 دقيقة + ضبط دقيق لدرجة حرارة كل منتج
 
 ## مسارات الخدمة
 
 ### إذا سأل عن السعر:
-1. اسأل: داخل الرياض أو خارجها؟ ونوع البضاعة ودرجة التبريد المطلوبة
-2. داخل الرياض: السعر يبدأ من 160 ريال، ويُحدَّد نهائيًا حسب المسافة والتكرار
-3. خارج الرياض: "نقيّم الرحلات خارج الرياض حسب توفّر الجدولة — خذ تفاصيلك وفريقنا يأكد لك الإمكانية والسعر خلال ساعات." (لا تلتزم بسعر أو بتنفيذ مؤكد)
-4. اربط السعر بالقيمة: "السعر يشمل تقرير حراري موثّق مع التسليم"
+⚠️ سياسة التسعير: لا تذكر أي رقم أو سعر أبداً — الأسعار تحدّدها الإدارة مباشرة.
+1. قل: "ممتاز، السعر يختلف حسب التفاصيل — أجمع منك المعلومات وفريقنا يرسل لك عرضاً دقيقاً خلال ساعات"
+2. اجمع: نوع المنتج، المسار، تكرار الرحلات، درجة الحرارة المطلوبة
+3. أبلغ المالك بطلب السعر مباشرة عبر أداة notify_owner_price_inquiry
+4. لا تذكر أي رقم نهائياً — انتظر التأكيد من الفريق
 
 ### إذا أراد حجز رحلة:
 اجمع هذه البيانات (سؤال واحد أو سؤالان في كل رسالة، لا تستجوبه):
@@ -132,8 +133,8 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 2. اطلب تفاصيل المشكلة
 3. أخبره أن الفريق سيتواصل خلال ساعتين
 
-### إذا اعترض على السعر:
-لا تجادل. قل: "النقل المبرد تأمين على بضاعتك — شحنة تتلف تكلّف أضعاف فرق السعر. والتقرير الحراري يحميك أمام أي مساءلة." ثم اعرض رحلة تجريبية.
+### إذا اعترض على السعر أو قال غالي:
+لا تناقش رقماً — لأنك لم تذكر رقماً أصلاً. قل: "فريقنا يبني العرض حسب احتياجك بالضبط — وكثير من عملائنا وجدوا القيمة أعلى من التوقع. الفريق يتواصل معك لتفصيل الأرقام." ثم انتهِ.
 
 ## التقفيل
 في نهاية أي محادثة مكتملة، رسالة واحدة:
@@ -165,7 +166,7 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 - اسمك **محمد** في كل الردود — لا "سمارت"، لا "Smart Field Bot"
 - الشركة: **Smart Field** (وليس سمارت فيلد باللاتيني بالعربية)
 - عند أول تعريف: "معك محمد من Smart Field"
-- السعر داخل الرياض يبدأ من 160 ريال — لا تذكر الأسعار الأعلى إلا إذا سأل خارج الرياض
+- لا تذكر أي سعر أو رقم تسعير أبداً — انتظر تأكيد الإدارة وأبلغ المالك عند كل سؤال عن السعر
 
 ━━━━━━━━━━━━━━━━━━━━
 BRAND GUIDELINES (مرجع إلزامي — لا تتجاوزه أبداً):
@@ -512,32 +513,22 @@ class AutonomousEmployee:
         }
 
         quote_tool = {
-            "name": "calculate_quote",
+            "name": "notify_owner_price_inquiry",
             "description": (
-                "احسب عرض سعر فوري للعميل. استخدمها فور أن يطلب العميل سعراً أو عرضاً، "
-                "أو عندما تجمع: المسار + نوع البضاعة."
+                "أبلغ المالك فوراً عندما يسأل العميل عن السعر أو يطلب عرضاً. "
+                "استدعِها مباشرة مع تفاصيل العميل — لا تعطِ أي سعر بنفسك."
             ),
             "input_schema": {
                 "type": "object",
                 "properties": {
+                    "client_phone": {"type": "string", "description": "رقم واتساب العميل"},
+                    "cargo_type": {"type": "string", "description": "نوع البضاعة"},
                     "route_from": {"type": "string", "description": "مدينة الإرسال"},
                     "route_to": {"type": "string", "description": "مدينة الاستلام"},
-                    "vehicle_type": {
-                        "type": "string",
-                        "enum": ["small_van", "medium_truck", "large_truck", "reefer_trailer"],
-                        "description": "small_van=فان / medium_truck=شاحنة متوسطة / large_truck=شاحنة كبيرة / reefer_trailer=مقطورة",
-                    },
-                    "temperature_zone": {
-                        "type": "string",
-                        "enum": ["chilled", "frozen", "pharma"],
-                        "description": "chilled=مبرد +2/+8 / frozen=مجمد -18/-25 / pharma=صيدلاني",
-                    },
-                    "frequency_per_month": {
-                        "type": "integer",
-                        "description": "عدد الرحلات في الشهر (افتراضي 1)",
-                    },
+                    "frequency": {"type": "string", "description": "تكرار الرحلات المطلوب"},
+                    "notes": {"type": "string", "description": "أي تفاصيل إضافية"},
                 },
-                "required": ["route_from", "route_to"],
+                "required": ["client_phone"],
             },
         }
 
@@ -551,20 +542,28 @@ class AutonomousEmployee:
                     self._register_lead_from_chat(phone, inputs, profile)
                 )
                 return {"status": "تم تسجيل العميل."}
-            elif name == "calculate_quote":
+            elif name == "notify_owner_price_inquiry":
                 try:
-                    q = self.cpq.calculate(
-                        route_from=inputs.get("route_from", ""),
-                        route_to=inputs.get("route_to", ""),
-                        vehicle_type=inputs.get("vehicle_type", "medium_truck"),
-                        temperature_zone=inputs.get("temperature_zone", "chilled"),
-                        frequency_per_month=int(inputs.get("frequency_per_month", 1)),
+                    cargo = inputs.get("cargo_type", "غير محدد")
+                    route = f"{inputs.get('route_from', '?')} → {inputs.get('route_to', '?')}"
+                    freq = inputs.get("frequency", "غير محدد")
+                    notes = inputs.get("notes", "")
+                    msg = (
+                        f"💰 *طلب سعر من عميل*\n"
+                        f"📱 واتساب: {phone}\n"
+                        f"📦 البضاعة: {cargo}\n"
+                        f"🗺️ المسار: {route}\n"
+                        f"🔄 التكرار: {freq}\n"
+                        f"📝 ملاحظات: {notes}\n\n"
+                        f"➡️ *تواصل مع العميل مباشرة لتقديم العرض*"
                     )
-                    quote_result = q.quote_summary_ar
-                    return {"quote": quote_result}
+                    for chat_id in self.owner_ids:
+                        asyncio.create_task(self.telegram.send_message(chat_id, msg))
+                    quote_result = "تم إبلاغ فريقنا بطلبك — سيتواصلون معك قريباً بعرض مفصّل."
+                    return {"status": "تم إبلاغ المالك بطلب السعر."}
                 except Exception as exc:
-                    logger.error("cpq.calculation_failed", error=str(exc))
-                    return {"quote": "لم أتمكن من حساب السعر الآن."}
+                    logger.error("price_inquiry.notify_failed", error=str(exc))
+                    return {"status": "تم تسجيل الطلب."}
             return {"error": f"unknown tool: {name}"}
 
         try:
@@ -843,8 +842,8 @@ class AutonomousEmployee:
         cargo_line = f" لنقل {cargo_type}" if cargo_type else ""
         return (
             f"السلام عليكم {lead_name}،\n\n"
-            f"Smart Field{cargo_line} — نقل مبرد B2B داخل الرياض يبدأ من 160 ريال للرحلة، مع تقرير حراري موثّق مع كل تسليم.\n\n"
-            f"متى يناسبكم مكالمة قصيرة نناقش فيها احتياجاتكم؟"
+            f"Smart Field{cargo_line} — نقل مبرد B2B احترافي مع تقرير حراري موثّق مع كل تسليم.\n\n"
+            f"فريقنا يُعِد لكم عرضاً مفصّلاً حسب احتياجكم — متى يناسبكم للتواصل؟"
         )
 
     async def _get_pipeline_stats(self) -> dict:

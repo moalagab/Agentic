@@ -251,41 +251,67 @@ _SAUDI_FOOD_TREND_QUERIES = [
 ]
 
 
+_TREND_KEYWORDS = [
+    "نقل مبرد",
+    "كيتيرينج",
+    "توصيل مبرد",
+    "مطابخ سحابية",
+    "سلسلة التبريد",
+]
+
+
 async def fetch_saudi_google_trends(api_key: str, max_results: int = 5) -> list[str]:
     """
-    جلب اهتمام السوق السعودي بمواضيع Cold Chain عبر Google Trends.
-    يستخدم engine: google_trends مع كلمات مفتاحية صناعية — بديل عن trending_now المحذوف.
+    جلب مستوى اهتمام السوق السعودي بمواضيع Cold Chain.
+    يستخدم interest_over_time من Google Trends ويحوّله إلى رؤى نصية
+    — الـ API لا يُعيد related_queries إلا عند استعلام واحد فقط بعض الأحيان.
     """
     if not api_key:
         return []
-    # Use interest-over-time for our industry keywords in SA
+
     params = {
         "engine": "google_trends",
-        "q": "نقل مبرد,سلسلة التوريد,أغذية فاخرة,مستودعات تبريد",
+        "q": ",".join(_TREND_KEYWORDS),
         "geo": "SA",
-        "date": "today 1-m",
+        "date": "today 3-m",
         "hl": "ar",
         "api_key": api_key,
     }
-    async with httpx.AsyncClient(timeout=20) as client:
+    async with httpx.AsyncClient(timeout=25) as client:
         try:
             resp = await client.get(SERPAPI_URL, params=params)
             if resp.status_code != 200:
                 logger.warning(f"SerpAPI trends {resp.status_code}: {resp.text[:120]}")
                 return []
             data = resp.json()
-            # interest_over_time → timeline_data → top queries or related topics
-            related = data.get("related_queries", {})
+
+            timeline: list[dict] = data.get("interest_over_time", {}).get("timeline_data", [])
+            if not timeline:
+                return []
+
+            # Accumulate interest per keyword across the 3-month timeline
+            totals: dict[str, int] = {k: 0 for k in _TREND_KEYWORDS}
+            for point in timeline:
+                if point.get("partial_data"):
+                    continue
+                for v in point.get("values", []):
+                    q = v.get("query", "")
+                    if q in totals:
+                        totals[q] += v.get("extracted_value", 0)
+
+            ranked = sorted(totals.items(), key=lambda x: x[1], reverse=True)
+
             topics: list[str] = []
-            for section in ("rising", "top"):
-                for item in related.get(section, [])[:max_results]:
-                    q = item.get("query", "")
-                    if q and q not in topics:
-                        topics.append(q)
-                if len(topics) >= max_results:
-                    break
-            logger.info(f"SerpAPI trends: fetched {len(topics)} Saudi industry topics")
+            for keyword, score in ranked:
+                if score > 0:
+                    topics.append(f"{keyword} (اهتمام: {score})")
+                elif not topics:
+                    # All zeros → at least include the top keyword as context
+                    topics.append(f"{keyword} (بحث نادر في SA حالياً)")
+
+            logger.info(f"SerpAPI trends: {len(topics)} SA topics extracted from interest_over_time")
             return topics[:max_results]
+
         except Exception as exc:
             logger.error(f"SerpAPI trends error: {exc}")
             return []
