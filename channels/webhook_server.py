@@ -544,7 +544,7 @@ async def revenue_dashboard() -> Response:
                     None,
                     lambda: __import__('httpx').get(
                         'http://localhost:3000/api/sessions/default',
-                        headers={'X-Api-Key': 'smartfield2026'}, timeout=3
+                        headers={'X-Api-Key': get_settings().WAHA_API_KEY}, timeout=3
                     )
                 )
                 data["waha_status"] = r.json().get("status", "?")
