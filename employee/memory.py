@@ -59,6 +59,8 @@ def init_db():
                 budget TEXT,
                 timeline TEXT,
                 crm_registered INTEGER DEFAULT 0,
+                conv_closed INTEGER DEFAULT 0,
+                close_reason TEXT,
                 updated_at TEXT NOT NULL
             );
 
@@ -95,6 +97,13 @@ def init_db():
                 created_at TEXT NOT NULL
             );
         """)
+    # Safe migration — add columns if they don't exist yet
+    with _get_conn() as conn:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(lead_profiles)").fetchall()}
+        if "conv_closed" not in existing:
+            conn.execute("ALTER TABLE lead_profiles ADD COLUMN conv_closed INTEGER DEFAULT 0")
+        if "close_reason" not in existing:
+            conn.execute("ALTER TABLE lead_profiles ADD COLUMN close_reason TEXT")
     logger.info("memory.db_initialized")
 
 
@@ -143,23 +152,29 @@ def get_lead_profile(phone: str) -> dict:
         "phone": phone, "stage": "new", "name": None, "company": None,
         "cargo_type": None, "route_from": None, "route_to": None,
         "fleet_size": None, "budget": None, "timeline": None,
-        "crm_registered": 0,
+        "crm_registered": 0, "conv_closed": 0, "close_reason": None,
     }
 
 
-def update_lead_profile(phone: str, **kwargs) -> None:
+def update_lead_profile(phone: str, updates: dict | None = None, **kwargs) -> None:
+    """Update lead profile. Accepts either a dict or keyword arguments."""
     profile = get_lead_profile(phone)
+    if updates:
+        profile.update(updates)
     profile.update(kwargs)
     profile["updated_at"] = datetime.utcnow().isoformat()
+    profile.setdefault("conv_closed", 0)
+    profile.setdefault("close_reason", None)
     with _get_conn() as conn:
         conn.execute(
             """INSERT INTO lead_profiles
                (phone, stage, name, company, cargo_type, route_from, route_to,
-                fleet_size, budget, timeline, crm_registered, updated_at)
+                fleet_size, budget, timeline, crm_registered, conv_closed, close_reason, updated_at)
                VALUES (:phone,:stage,:name,:company,:cargo_type,:route_from,:route_to,
-                       :fleet_size,:budget,:timeline,:crm_registered,:updated_at)
+                       :fleet_size,:budget,:timeline,:crm_registered,:conv_closed,:close_reason,:updated_at)
                ON CONFLICT(phone) DO UPDATE SET
-                 stage=excluded.stage, name=COALESCE(excluded.name, lead_profiles.name),
+                 stage=excluded.stage,
+                 name=COALESCE(excluded.name, lead_profiles.name),
                  company=COALESCE(excluded.company, lead_profiles.company),
                  cargo_type=COALESCE(excluded.cargo_type, lead_profiles.cargo_type),
                  route_from=COALESCE(excluded.route_from, lead_profiles.route_from),
@@ -168,6 +183,8 @@ def update_lead_profile(phone: str, **kwargs) -> None:
                  budget=COALESCE(excluded.budget, lead_profiles.budget),
                  timeline=COALESCE(excluded.timeline, lead_profiles.timeline),
                  crm_registered=excluded.crm_registered,
+                 conv_closed=excluded.conv_closed,
+                 close_reason=COALESCE(excluded.close_reason, lead_profiles.close_reason),
                  updated_at=excluded.updated_at""",
             profile,
         )
@@ -248,6 +265,17 @@ def mark_follow_up_done(follow_up_id: int, next_days: int | None = None, notes: 
                    WHERE id=?""",
                 (datetime.utcnow().isoformat(), notes, follow_up_id),
             )
+
+
+def cancel_follow_ups(phone: str) -> int:
+    """Cancel all pending follow-ups for a phone number (e.g. after conversation close)."""
+    with _get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE lead_follow_ups SET status='cancelled', notes='محادثة أُغلقت' "
+            "WHERE lead_phone=? AND status='pending'",
+            (phone,),
+        )
+        return cur.rowcount
 
 
 # ─── Action log ──────────────────────────────────────────────────────────────

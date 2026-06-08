@@ -290,6 +290,10 @@ class WhatsAppChannelHandler:
                 if not body or msg.get("type") not in ("chat", "text", None):
                     return None
                 raw_from = msg.get("from", "")  # e.g. "966501234567@c.us" or "xxx@lid"
+                # Ignore group chats — @g.us suffix = WhatsApp group
+                if "@g.us" in raw_from:
+                    self._log.debug("wa.group_message_ignored", chat=raw_from[:30])
+                    return None
                 # Keep raw_from as chatId for reply — strip @suffix for display phone
                 chat_id = raw_from
                 phone = raw_from.split("@")[0]

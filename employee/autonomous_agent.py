@@ -94,9 +94,18 @@ EMPLOYEE_SYSTEM_PROMPT = f"""\
 - ردودك قصيرة ومركّزة — جملتان إلى أربع كحد أقصى، بلا حشو
 - لا تكرر نفس الترحيب، ولا تكرر معلومة قلتها قبل
 
-## قاعدة الترحيب
-- الرسالة الأولى فقط: رحّب بإيجاز ثم أجب مباشرة
-- الرسائل التالية: بلا ترحيب — استمر في الموضوع مباشرة
+## قاعدة الترحيب والتكرار (صارمة)
+- **الرسالة الأولى فقط**: رحّب بجملة واحدة ثم أجب مباشرة
+- **الرسائل التالية**: بلا أي ترحيب — استمر في الموضوع مباشرة
+- **لا تكرر معلومة قلتها في نفس المحادثة** — العميل قرأها
+- **لا تعيد تعريف الشركة أو خدماتها** إذا سبق ذكرها
+- إذا رجع العميل بعد صمت: استمر من آخر نقطة، لا تبدأ من صفر
+- اختصر — ردّك يجب أن يُضيف شيئاً جديداً أو يُحرّك المحادثة للأمام
+
+## إغلاق المحادثة
+- إذا وصلت المحادثة لنهاية طبيعية (تم تحديد موعد / أُبلغ المالك بطلب السعر / رفض العميل أو قال "شكراً"):
+  → ختم قصير بجملة واحدة ثم استخدم أداة `close_conversation`
+- لا ترسل رسائل إضافية بعد الإغلاق في نفس الجلسة
 
 ## خدماتنا
 - نقل مبرد B2B — نغطي الرياض والمناطق المجاورة
@@ -321,8 +330,8 @@ class AutonomousEmployee:
                     # Greeting-only contact: no name collected — warm, open message
                     msg = build_greeting_followup_message(fu["attempts"])
                     await self._send_whatsapp(phone, msg)
-                    # One more attempt after 48h, then stop
-                    next_days = 2 if fu["attempts"] == 0 else None
+                    # Attempt 0 → +3 days; attempt 1 → stop (max 2 reminders for cold contacts)
+                    next_days = 3 if fu["attempts"] == 0 else None
                     mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
                     mem.log_action(
                         "greeting_follow_up",
@@ -345,7 +354,8 @@ class AutonomousEmployee:
                     else:
                         msg = build_follow_up_message(lead_name, fu["attempts"])
                         await self._send_whatsapp(phone, msg)
-                    next_days = None if fu["attempts"] >= 2 else (3 if fu["attempts"] == 0 else 7)
+                    # attempt 0 → +2 days; attempt 1 → +3 days; attempt 2+ → stop
+                    next_days = None if fu["attempts"] >= 2 else (2 if fu["attempts"] == 0 else 3)
                     mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
                     mem.log_action(
                         "proactive_follow_up",
@@ -395,7 +405,7 @@ class AutonomousEmployee:
                 lead_name=lead_dict.get("name", ""),
                 lead_phone=lead_phone,
                 crm_id=lead_dict.get("crm_id"),
-                days_until=1,
+                days_until=2,  # first follow-up after 2 days
             )
         mem.log_action("new_lead_notified", f"إشعار بعميل جديد: {lead_dict.get('name')}", "نجح")
 
@@ -480,13 +490,18 @@ class AutonomousEmployee:
 
         # Build a minimal 1-3 line context — trust Claude to handle the flow
         ctx_parts = []
-        if msg_count == 0:
+        is_first_msg = (msg_count == 0)
+        if is_first_msg:
             ctx_parts.append("أول رسالة من هذا العميل.")
+        else:
+            ctx_parts.append(f"رسالة {msg_count + 1} في نفس المحادثة — لا تُعِد الترحيب أو المعلومات السابقة.")
         summary = self._profile_summary(profile)
         if summary != "لا شيء بعد":
-            ctx_parts.append(f"ما جُمع: {summary}")
+            ctx_parts.append(f"ما جُمع بالفعل: {summary}")
         if profile.get("crm_registered"):
-            ctx_parts.append("العميل مسجّل بالفعل — أجب مباشرة.")
+            ctx_parts.append("العميل مسجّل بالفعل — أجب مباشرة بدون تعريف.")
+        if profile.get("conv_closed"):
+            ctx_parts.append("المحادثة أُغلقت سابقاً — لا ترسل رداً إلا إذا بدأ العميل موضوعاً جديداً تماماً.")
         ctx = "\n".join(ctx_parts) if ctx_parts else "محادثة جديدة."
 
         extract_tool = {
@@ -512,6 +527,26 @@ class AutonomousEmployee:
             },
         }
 
+        close_tool = {
+            "name": "close_conversation",
+            "description": (
+                "أغلق المحادثة بعد انتهائها الطبيعي: تم تحديد موعد، أو أُبلغ المالك بطلب السعر، "
+                "أو رفض العميل، أو قال شكراً/مع السلامة. استدعِها مباشرة بعد إرسال آخر رد."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "enum": ["price_forwarded", "booking_confirmed", "rejected", "no_interest", "completed"],
+                        "description": "سبب الإغلاق",
+                    },
+                    "summary": {"type": "string", "description": "ملخص ما اتُّفق عليه (اختياري)"},
+                },
+                "required": ["reason"],
+            },
+        }
+
         quote_tool = {
             "name": "notify_owner_price_inquiry",
             "description": (
@@ -532,16 +567,36 @@ class AutonomousEmployee:
             },
         }
 
+        # Skip response if conversation was previously closed and no new topic
+        if profile.get("conv_closed") and msg_count > 0:
+            # Re-open on new substantive message (not just "ok", "شكرا")
+            short_fillers = {"ok", "okay", "شكرا", "شكراً", "تمام", "👍", "🙏", "ماشي"}
+            if message.strip().lower() in short_fillers or len(message.strip()) < 5:
+                logger.info("employee.conv_closed_skip", phone=phone)
+                return ""
+
         system = EMPLOYEE_SYSTEM_PROMPT + f"\n\n{ctx}"
         quote_result: str | None = None
+        should_close: bool = False
 
         async def _conv_tool_exec(name: str, inputs: dict) -> dict:
-            nonlocal quote_result
+            nonlocal quote_result, should_close
             if name == "register_lead":
                 asyncio.create_task(
                     self._register_lead_from_chat(phone, inputs, profile)
                 )
                 return {"status": "تم تسجيل العميل."}
+            elif name == "close_conversation":
+                should_close = True
+                reason = inputs.get("reason", "completed")
+                summary = inputs.get("summary", "")
+                mem.update_lead_profile(phone, {"conv_closed": True, "close_reason": reason})
+                # Cancel any pending follow-ups for this phone
+                mem.cancel_follow_ups(phone)
+                logger.info("employee.conv_closed", phone=phone, reason=reason)
+                if summary:
+                    mem.log_action("conv_closed", summary, "تم", f"wa:{phone}")
+                return {"status": "تم إغلاق المحادثة."}
             elif name == "notify_owner_price_inquiry":
                 try:
                     cargo = inputs.get("cargo_type", "غير محدد")
@@ -571,7 +626,7 @@ class AutonomousEmployee:
                 api_key=self.config.GEMINI_API_KEY,
                 system=system,
                 user_message=message,
-                tools=[extract_tool, quote_tool],
+                tools=[extract_tool, close_tool, quote_tool],
                 tool_executor=_conv_tool_exec,
                 max_iterations=3,
                 model=GEMINI_MODEL,
@@ -584,15 +639,15 @@ class AutonomousEmployee:
         # Update profile keywords from raw message (no extra API call)
         await self._update_profile_from_message(phone, message, profile, False)
 
-        # After the very first message — schedule a 6h follow-up in case they go silent
+        # After the very first message — schedule a 2-day follow-up if they go silent
         # Only if no useful data collected yet (greeting-only contact)
-        if msg_count == 0 and not profile.get("crm_registered"):
+        if is_first_msg and not profile.get("crm_registered"):
             mem.schedule_follow_up(
                 lead_id=f"wa:{phone}",
                 lead_name="",
                 lead_phone=phone,
                 crm_id=None,
-                hours_until=6,
+                days_until=2,
                 stage="greeting_only",
             )
 
