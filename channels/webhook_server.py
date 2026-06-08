@@ -57,6 +57,8 @@ from processors.customer_success import CustomerSuccessEngine
 from processors.learning_loop import LearningLoop
 from processors.outbound_sender import OutboundSender
 from processors.waha_monitor import WAHAMonitor
+from processors.backup_engine import BackupEngine
+from processors.ab_test_engine import ABTestEngine
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 from dashboard.leads_admin import render_leads_admin
 
@@ -84,6 +86,8 @@ _outbound_sender: Optional[OutboundSender] = None
 _creative_followup: Optional[CreativeFollowupEngine] = None
 _contract_converter: Optional[ContractConverter] = None
 _waha_monitor: Optional[WAHAMonitor] = None
+_backup_engine: Optional[BackupEngine] = None
+_ab_engine: Optional[ABTestEngine] = None
 
 # Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
 _processed_wa_ids: OrderedDict[str, None] = OrderedDict()
@@ -102,7 +106,7 @@ _THREAD_LOCK_TTL_S = 7200  # 2 hours
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize all components on startup."""
-    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop, _outbound_sender, _creative_followup, _contract_converter
+    global _pipeline, _wa_handler, _wa_notifier, _li_handler, _gf_handler, _ws_handler, _tg_handler, _employee, _scheduler, _followup_engine, _booking_manager, _sla_monitor, _proposal_manager, _cpq_engine, _content_engine, _cs_engine, _learning_loop, _outbound_sender, _creative_followup, _contract_converter, _waha_monitor, _backup_engine, _ab_engine
 
     settings = get_settings()
 
@@ -220,6 +224,21 @@ async def lifespan(app: FastAPI):
         owner_chat_ids=_owner_ids,
     )
 
+    # Initialize BackupEngine
+    if _pipeline and _pipeline.primary_crm:
+        try:
+            supabase_client = getattr(_pipeline.primary_crm, "client", None)
+            if supabase_client:
+                _backup_engine = BackupEngine(
+                    supabase_client=supabase_client,
+                    telegram=_tg_handler,
+                    owner_chat_ids=_owner_ids,
+                )
+                _ab_engine = ABTestEngine(supabase_client)
+                log.info("BackupEngine + ABTestEngine initialized")
+        except Exception as exc:
+            log.warning("BackupEngine init failed", error=str(exc))
+
     # Start the autonomous scheduler (daily reports, follow-ups, etc.)
     _scheduler = SmartfieldScheduler(
         _employee,
@@ -232,6 +251,7 @@ async def lifespan(app: FastAPI):
         creative_followup_engine=_creative_followup,
         contract_converter=_contract_converter,
         waha_monitor=_waha_monitor,
+        backup_engine=_backup_engine,
     )
     _scheduler.start()
 
@@ -508,6 +528,28 @@ async def revenue_dashboard() -> Response:
             from supabase import create_client
             supabase = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
             data = await get_dashboard_data(supabase)
+            # Enrich with A/B stats
+            if _ab_engine:
+                try:
+                    data["ab_stats"] = await _ab_engine.get_stats()
+                except Exception:
+                    data["ab_stats"] = {}
+            # Enrich with backup info
+            if _backup_engine:
+                data["backup_info"] = _backup_engine.get_latest_backup_info()
+            # WAHA status
+            try:
+                import httpx as _hx
+                r = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: __import__('httpx').get(
+                        'http://localhost:3000/api/sessions/default',
+                        headers={'X-Api-Key': 'smartfield2026'}, timeout=3
+                    )
+                )
+                data["waha_status"] = r.json().get("status", "?")
+            except Exception:
+                data["waha_status"] = "unknown"
         else:
             data = {
                 "total": 0, "today": 0, "week": 0, "month": 0,
@@ -515,6 +557,7 @@ async def revenue_dashboard() -> Response:
                 "by_status": {}, "by_priority": {}, "by_source": {},
                 "by_category": {}, "top_leads": [],
                 "generated_at": datetime.utcnow().isoformat(),
+                "ab_stats": {}, "backup_info": None, "waha_status": "unknown",
             }
         html = render_dashboard_html(data)
         return Response(content=html, media_type="text/html; charset=utf-8")
@@ -1364,6 +1407,35 @@ async def _handle_telegram_callback(cq: dict):
         except Exception:
             pass
 
+
+
+
+# ─── Nightly Backup API ───────────────────────────────────────────────────────
+
+@app.post("/api/backup/run", tags=["Backup"])
+async def run_backup_now():
+    if not _backup_engine:
+        return {"error": "BackupEngine not initialized"}
+    result = await _backup_engine.run_nightly_backup()
+    return {"success": True, "result": result}
+
+
+@app.get("/api/backup/info", tags=["Backup"])
+async def get_backup_info():
+    if not _backup_engine:
+        return {"error": "BackupEngine not initialized"}
+    info = _backup_engine.get_latest_backup_info()
+    return {"success": True, "latest": info}
+
+
+# ─── A/B Test API ─────────────────────────────────────────────────────────────
+
+@app.get("/api/ab-test/stats", tags=["Analytics"])
+async def get_ab_test_stats():
+    if not _ab_engine:
+        return {"error": "ABTestEngine not initialized"}
+    stats = await _ab_engine.get_stats()
+    return {"success": True, "stats": stats}
 
 @app.post("/setup/telegram-webhook", tags=["System"])
 async def setup_telegram_webhook(

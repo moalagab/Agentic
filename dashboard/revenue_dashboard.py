@@ -219,6 +219,78 @@ def _render_today_messages(messages: list) -> str:
   </div>"""
 
 
+def _render_ab_section(ab_stats: dict) -> str:
+    if not ab_stats:
+        return ""
+    colors = {"A": "#3b82f6", "B": "#22c55e", "C": "#f59e0b"}
+    rows = ""
+    winner = max(ab_stats.items(), key=lambda x: x[1].get("rate", 0), default=(None, {}))[0]
+    for k, s in ab_stats.items():
+        color = colors.get(k, "#64748b")
+        bar_w = min(int(s.get("rate", 0) * 3), 100)
+        badge = " 🏆" if k == winner and s.get("sent", 0) > 0 else ""
+        rows += f"""
+        <tr style="border-bottom:1px solid #f1f5f9">
+          <td style="padding:10px 12px"><span style="font-weight:700;color:{color}">نسخة {k}{badge}</span></td>
+          <td style="padding:10px 12px;color:#64748b;font-size:12px">{s.get("name","")}</td>
+          <td style="padding:10px 12px;text-align:center;font-weight:600">{s.get("sent",0)}</td>
+          <td style="padding:10px 12px;text-align:center;font-weight:600;color:#16a34a">{s.get("responded",0)}</td>
+          <td style="padding:10px 12px">
+            <div style="background:#f1f5f9;border-radius:4px;height:8px;width:80px;display:inline-block;vertical-align:middle;overflow:hidden">
+              <div style="background:{color};height:8px;width:{bar_w}px;border-radius:4px"></div>
+            </div>
+            <span style="font-size:12px;color:{color};font-weight:700;margin-right:6px">{s.get("rate",0)}%</span>
+          </td>
+        </tr>"""
+    return f"""
+  <div class="card">
+    <h2>🧪 A/B Test — رسائل الـ Outreach</h2>
+    <table style="width:100%;border-collapse:collapse;font-size:13px">
+      <thead><tr style="background:#f8fafc;color:#64748b">
+        <th style="padding:8px 12px;text-align:right">النسخة</th>
+        <th style="padding:8px 12px;text-align:right">النوع</th>
+        <th style="padding:8px 12px;text-align:center">أُرسل</th>
+        <th style="padding:8px 12px;text-align:center">استجاب</th>
+        <th style="padding:8px 12px;text-align:center">معدل التحويل</th>
+      </tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+    <p style="font-size:11px;color:#94a3b8;margin-top:8px">التناوب: A→B→C→A (round-robin) | يتحدث تلقائياً</p>
+  </div>"""
+
+
+def _render_system_health(waha_status: str, backup_info: dict) -> str:
+    waha_color = "#22c55e" if waha_status in ("WORKING", "CONNECTED") else "#ef4444"
+    waha_icon = "🟢" if waha_status in ("WORKING", "CONNECTED") else "🔴"
+    backup_line = "لا توجد نسخة احتياطية بعد"
+    backup_color = "#94a3b8"
+    if backup_info:
+        total_rows = sum(backup_info.get("tables", {}).values())
+        backup_line = f"آخر نسخة: {backup_info['date']} | {total_rows:,} سجل"
+        backup_color = "#22c55e"
+    return f"""
+  <div class="card">
+    <h2>⚙️ حالة النظام</h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px">
+      <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:20px">{waha_icon}</div>
+        <div style="font-size:13px;font-weight:600;color:{waha_color};margin-top:4px">واتساب: {waha_status}</div>
+        <div style="font-size:11px;color:#94a3b8">WhatsApp Session</div>
+      </div>
+      <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:20px">💾</div>
+        <div style="font-size:12px;font-weight:600;color:{backup_color};margin-top:4px">{backup_line}</div>
+        <div style="font-size:11px;color:#94a3b8">Nightly Backup | 7 أيام</div>
+      </div>
+      <div style="background:#f8fafc;border-radius:8px;padding:14px;text-align:center">
+        <div style="font-size:20px">🤖</div>
+        <div style="font-size:13px;font-weight:600;color:#22c55e;margin-top:4px">13 Job نشط</div>
+        <div style="font-size:11px;color:#94a3b8">APScheduler</div>
+      </div>
+    </div>
+  </div>"""
+
+
 def render_dashboard_html(data: dict) -> str:
     total      = data["total"]
     today      = data["today"]
@@ -367,7 +439,7 @@ def render_dashboard_html(data: dict) -> str:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Smart Field — Revenue Dashboard</title>
-<meta http-equiv="refresh" content="120">
+<meta http-equiv="refresh" content="30">
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
   body{{font-family:'Segoe UI',Arial,sans-serif;background:#f8fafc;color:#1e293b;direction:rtl}}
@@ -533,6 +605,12 @@ def render_dashboard_html(data: dict) -> str:
 
   <!-- Today's WhatsApp Messages -->
   {_render_today_messages(today_messages)}
+
+  <!-- A/B Test Results -->
+  {_render_ab_section(data.get("ab_stats") or {})}
+
+  <!-- System Health -->
+  {_render_system_health(data.get("waha_status", "unknown"), data.get("backup_info"))}
 
 </div>
 </body>

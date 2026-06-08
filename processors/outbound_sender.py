@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 import structlog
 
 from agent.cold_outreach import build_outreach_for_prospect
+from processors.ab_test_engine import ABTestEngine, pick_variant, render_variant, VARIANTS
 
 if TYPE_CHECKING:
     from crm.supabase_crm import SupabaseCRM
@@ -51,6 +52,7 @@ class OutboundSender:
         self.telegram = telegram
         self.owner_chat_ids = owner_chat_ids or []
         self.daily_cap = daily_cap
+        self.ab_engine = ABTestEngine(crm.client)
         self._log = logger.bind(component="OutboundSender")
 
     # ── Main daily job (called at 9:30 AM) ────────────────────────────────────
@@ -89,7 +91,7 @@ class OutboundSender:
 
         sent_count = 0
         for lead in leads:
-            ok = await self._send_approval_card(lead)
+            ok = await self._send_approval_card(lead, idx)
             if ok:
                 await self._update_approval_status(lead["id"], "BATCH_SENT")
                 sent_count += 1
@@ -103,7 +105,7 @@ class OutboundSender:
 
     # ── Telegram approval card ─────────────────────────────────────────────────
 
-    async def _send_approval_card(self, lead: dict) -> bool:
+    async def _send_approval_card(self, lead: dict, idx: int = 0) -> bool:
         """Send one lead as a Telegram card with ✅/❌ inline buttons."""
         raw = lead.get("raw_data") or {}
         if isinstance(raw, str):
@@ -117,7 +119,15 @@ class OutboundSender:
         score    = lead.get("score", 0)
         icp      = lead.get("icp_segment") or "—"
         category = raw.get("gemini_category") or lead.get("category", "—")
+        # Assign A/B variant round-robin
+        variant_key = pick_variant(idx)
+        company = lead.get("name", "")
+        ab_msg = render_variant(variant_key, company)
+        if not raw.get("draft_message"):
+            raw["draft_message"] = ab_msg
+        raw["ab_variant"] = variant_key
         draft    = (raw.get("draft_message") or "").strip()[:280]
+        variant_label = VARIANTS.get(variant_key, {}).get("name", variant_key)
 
         text = (
             f"🏢 *{name}*\n"
@@ -181,6 +191,9 @@ class OutboundSender:
         sent = await self.notifier.send_custom_message(phone, message)
         if sent:
             await self._mark_sent(lead_id, message)
+            # Record A/B variant
+            variant = raw.get("ab_variant", "A")
+            await self.ab_engine.record_variant(lead_id, variant, raw)
             self._log.info("outbound.sent", name=lead.get("name"), phone=phone)
             return f"✅ أُرسلت لـ *{lead.get('name')}*"
         else:

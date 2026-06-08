@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from processors.followup_engine import CreativeFollowupEngine
     from processors.contract_converter import ContractConverter
     from processors.waha_monitor import WAHAMonitor
+    from processors.backup_engine import BackupEngine
 
 logger = structlog.get_logger(__name__)
 
@@ -62,6 +63,7 @@ class SmartfieldScheduler:
         creative_followup_engine: "Optional[CreativeFollowupEngine]" = None,
         contract_converter: "Optional[ContractConverter]" = None,
         waha_monitor: "Optional[WAHAMonitor]" = None,
+        backup_engine: "Optional[BackupEngine]" = None,
     ):
         self.employee = employee
         self.pipeline = pipeline
@@ -73,6 +75,7 @@ class SmartfieldScheduler:
         self.creative_followup_engine = creative_followup_engine
         self.contract_converter = contract_converter
         self.waha_monitor = waha_monitor
+        self.backup_engine = backup_engine
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -218,6 +221,16 @@ class SmartfieldScheduler:
             misfire_grace_time=300,
         )
 
+        # Nightly backup — every day at 3:00 AM
+        self.scheduler.add_job(
+            self._run_nightly_backup,
+            CronTrigger(hour=3, minute=0, timezone=RIYADH_TZ),
+            id="nightly_backup",
+            name="النسخ الاحتياطي الليلي",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
         # WAHA health check — every 5 minutes
         self.scheduler.add_job(
             self._run_waha_health_check,
@@ -228,7 +241,7 @@ class SmartfieldScheduler:
             misfire_grace_time=60,
         )
 
-        logger.info("scheduler.jobs_registered", count=12)
+        logger.info("scheduler.jobs_registered", count=13)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
@@ -561,6 +574,18 @@ class SmartfieldScheduler:
         if should_run:
             logger.info("scheduler.startup_content_running", reason="no run in last 7 days")
             await self._run_content_plan()
+
+    async def _run_nightly_backup(self):
+        """النسخ الاحتياطي الليلي — يعمل الساعة 3 صباحاً."""
+        if not self.backup_engine:
+            return
+        try:
+            result = await self.backup_engine.run_nightly_backup()
+            logger.info("scheduler.backup_done",
+                        total_rows=result.get("total_rows", 0),
+                        errors=len(result.get("errors", [])))
+        except Exception as exc:
+            logger.error("scheduler.backup_error", error=str(exc))
 
     async def _run_waha_health_check(self):
         """Monitor WhatsApp session and auto-reconnect on failure."""
