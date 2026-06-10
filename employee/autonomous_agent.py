@@ -304,60 +304,59 @@ class AutonomousEmployee:
 
     async def run_proactive_follow_ups(self) -> int:
         """
-        Check for overdue follow-ups and send messages automatically.
+        Check for overdue greeting/conversation follow-ups and send once per day.
+        Only handles non-seq stages (greeting_only, initial) — seq_ handled by FollowUpEngine.
         Returns the number of follow-ups sent.
         """
         due = mem.get_due_follow_ups()
+        # Only handle non-pipeline stages here
+        conv_due = [f for f in due if not str(f.get("stage", "")).startswith("seq_")]
+
+        today = datetime.utcnow().date().isoformat()
+        sent_today: set[str] = set()
         sent = 0
-        for fu in due:
+
+        for fu in conv_due:
             try:
                 phone = fu["lead_phone"]
+                if not phone or phone in sent_today:
+                    continue
 
-                # Check if they replied since the follow-up was scheduled
-                # (msg_count > 2 means they engaged after the greeting)
                 msg_count = mem.get_message_count(phone)
-                profile = mem.get_lead_profile(phone)
+                profile   = mem.get_lead_profile(phone)
 
-                is_greeting_only = fu.get("stage", "").startswith("greeting_only")
-
-                # Skip if they already engaged (more than the greeting exchange)
-                # or already registered in CRM
-                if profile.get("crm_registered") or msg_count > 2:
+                # Skip: already engaged, registered, closed, or max attempts reached
+                if profile.get("crm_registered") or profile.get("conv_closed") or msg_count > 2:
                     mem.mark_follow_up_done(fu["id"], notes="عميل تفاعل — لا حاجة للمتابعة")
                     continue
 
-                if is_greeting_only:
-                    # Greeting-only contact: no name collected — warm, open message
-                    msg = build_greeting_followup_message(fu["attempts"])
-                    await self._send_whatsapp(phone, msg)
-                    # Attempt 0 → +3 days; attempt 1 → stop (max 2 reminders for cold contacts)
-                    next_days = 3 if fu["attempts"] == 0 else None
-                    mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
-                    mem.log_action(
-                        "greeting_follow_up",
-                        f"متابعة تحية مع {phone} (محاولة {fu['attempts']+1})",
-                        "تم الإرسال",
-                        fu["lead_id"],
-                    )
-                else:
-                    # Named/qualified lead follow-up — always via WAHA (no Twilio templates)
-                    lead_name = fu["lead_name"] or "عزيزي العميل"
-                    msg = build_follow_up_message(lead_name, fu["attempts"])
-                    await self._send_whatsapp(phone, msg)
-                    # attempt 0 → +2 days; attempt 1 → +3 days; attempt 2+ → stop
-                    next_days = None if fu["attempts"] >= 2 else (2 if fu["attempts"] == 0 else 3)
-                    mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")
-                    mem.log_action(
-                        "proactive_follow_up",
-                        f"متابعة تلقائية مع {fu['lead_name']} (محاولة {fu['attempts']+1})",
-                        "تم الإرسال",
-                        fu["lead_id"],
-                    )
+                # Max 1 follow-up attempt for greeting-only contacts
+                if fu["attempts"] >= 1:
+                    mem.mark_follow_up_done(fu["id"], notes="تجاوز الحد — إيقاف")
+                    continue
 
+                is_greeting_only = str(fu.get("stage", "")).startswith("greeting_only")
+                if is_greeting_only:
+                    msg = build_greeting_followup_message(fu["attempts"])
+                else:
+                    lead_name = fu["lead_name"] or ""
+                    msg = build_follow_up_message(lead_name, fu["attempts"])
+
+                await self._send_whatsapp(phone, msg)
+                mem.mark_follow_up_done(fu["id"], next_days=None, notes=f"تم الإرسال | {today}")
+                mem.log_action(
+                    "proactive_follow_up",
+                    f"متابعة مع {fu.get('lead_name') or phone} (محاولة 1)",
+                    "تم الإرسال",
+                    fu["lead_id"],
+                )
+                sent_today.add(phone)
                 sent += 1
                 await asyncio.sleep(1)
+
             except Exception as exc:
                 logger.error("employee.follow_up_failed", lead_id=fu["lead_id"], error=str(exc))
+
         logger.info("employee.follow_ups_sent", count=sent)
         return sent
 

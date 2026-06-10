@@ -36,54 +36,72 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
-# ── تسلسل الإرسال ─────────────────────────────────────────────────────────────
 
+def _was_sent_today(lead_id: str, today: str) -> bool:
+    """
+    True إذا تم إرسال رسالة متابعة لهذا العميل اليوم مسبقاً.
+    يقرأ من جدول agent_actions في SQLite.
+    """
+    try:
+        from employee.memory import _get_conn
+        with _get_conn() as conn:
+            row = conn.execute(
+                """SELECT id FROM agent_actions
+                   WHERE lead_id = ? AND action_type = 'seq_followup'
+                   AND created_at LIKE ?
+                   LIMIT 1""",
+                (lead_id, f"{today}%"),
+            ).fetchone()
+        return row is not None
+    except Exception:
+        return False  # في حالة الخطأ نسمح بالإرسال
+
+
+# ── تسلسل الإرسال: رسالتان فقط لكل عميل ─────────────────────────────────────
+#
+#   seq_welcome  → فور التسجيل (delay 0)
+#   seq_followup → بعد يومين إذا لم يرد (delay 48h)
+#   توقف تام بعدها — لا مزيد من الرسائل
+#
 FOLLOWUP_SEQUENCES: dict[str, list[dict]] = {
-    "high": [
-        {"stage": "seq_welcome",       "delay_hours": 0},
-        {"stage": "seq_service_intro", "delay_hours": 24},
-        {"stage": "seq_trial_offer",   "delay_hours": 72},
+    "high":   [
+        {"stage": "seq_welcome",  "delay_hours": 0},
+        {"stage": "seq_followup", "delay_hours": 48},
     ],
     "medium": [
-        {"stage": "seq_welcome",       "delay_hours": 1},
-        {"stage": "seq_service_intro", "delay_hours": 72},
-        {"stage": "seq_trial_offer",   "delay_hours": 168},
+        {"stage": "seq_welcome",  "delay_hours": 0},
+        {"stage": "seq_followup", "delay_hours": 48},
     ],
     "low": [
-        {"stage": "seq_service_intro", "delay_hours": 72},
-        {"stage": "seq_trial_offer",   "delay_hours": 168},
+        {"stage": "seq_followup", "delay_hours": 48},
     ],
 }
 
-# ── نصوص الرسائل (عربي حر — لا templates) ────────────────────────────────────
+# ── نصوص الرسائل ─────────────────────────────────────────────────────────────
 
 def _build_message(stage: str, name: str) -> str:
-    """بناء نص الرسالة بناءً على المرحلة واسم العميل."""
-    greeting = f"{name}" if name and name not in ("عميل", "WhatsApp Contact", "") else "أهلاً"
+    """بناء نص الرسالة — قصير، مباشر، غير مزعج."""
+    n = name if name and name not in ("عميل", "WhatsApp Contact", "") else ""
 
     if stage == "seq_welcome":
+        greeting = f"أهلاً {n} 👋\n" if n else "أهلاً 👋\n"
         return (
-            f"أهلاً {greeting} 👋\n"
-            "شكراً على تواصلك مع Smart Field للنقل المبرد في الرياض.\n"
+            f"{greeting}"
+            "معك Smart Field للنقل المبرد في الرياض.\n"
             "كيف نقدر نخدمك؟ 🌡️"
         )
-    if stage == "seq_service_intro":
+
+    if stage == "seq_followup":
+        greeting = f"مرحباً {n}،\n" if n else "مرحباً،\n"
         return (
-            f"مرحباً {greeting} 🚐\n"
-            "نحن Smart Field — متخصصين في النقل المبرد الموثوق بالرياض.\n"
-            "كل رحلة معنا تأتي مع تقرير حراري موثق يحمي بضاعتك.\n"
-            "نرتّب معك رحلة تجريبية؟"
+            f"{greeting}"
+            "نتابع معك بخصوص احتياجاتك في النقل المبرد.\n"
+            "لو في أي استفسار نحن هنا. 🚐"
         )
-    if stage == "seq_trial_offer":
-        return (
-            f"مرحباً {greeting} 🌡️\n"
-            "ما زلنا جاهزين لخدمتك — لو احتجت نقل مبرد في أي وقت نحن هنا.\n"
-            "رحلة تجريبية بدون التزام — تواصل معنا: wa.me/966561167169"
-        )
+
     # fallback
     return (
-        f"مرحباً {greeting}، نتابع معك بخصوص خدمات النقل المبرد من Smart Field.\n"
-        "هل في أي استفسار نقدر نساعد فيه؟ 🌡️"
+        f"مرحباً{' ' + n if n else ''}، هل في شيء نقدر نساعدك فيه؟ 🌡️"
     )
 
 
@@ -153,7 +171,7 @@ class FollowUpEngine:
 
     async def run_due_followups(self) -> int:
         """
-        Send all follow-up messages that are due now.
+        Send due follow-up messages — once per lead per day, max 2 messages total.
         Called by the scheduler every 2 hours.
         Returns the number of messages sent.
         """
@@ -162,8 +180,10 @@ class FollowUpEngine:
             return 0
 
         due = get_due_follow_ups()
-        # Only handle pipeline-sequenced steps (stage starts with "seq_")
         seq_due = [f for f in due if str(f.get("stage", "")).startswith(self._SEQ_PREFIX)]
+
+        today = datetime.utcnow().date().isoformat()   # "2026-06-10"
+        sent_today: set[str] = set()                   # phones already messaged this run
 
         sent = 0
         for fu in seq_due:
@@ -175,24 +195,36 @@ class FollowUpEngine:
                 mark_follow_up_done(fu["id"], notes="لا يوجد رقم")
                 continue
 
-            # Skip if customer already engaged (replied or registered in CRM)
-            profile   = get_lead_profile(phone)
+            # ── 1. لا ترسل لنفس الشخص مرتين في نفس اليوم ─────────────────
+            if phone in sent_today:
+                self._log.debug("followup.skip_already_sent_today", phone=phone)
+                continue
+
+            # ── 2. لا ترسل إذا تم الإرسال له اليوم مسبقاً (في run سابق) ──
+            if _was_sent_today(fu["lead_id"], today):
+                sent_today.add(phone)
+                self._log.debug("followup.skip_sent_earlier_today", phone=phone)
+                continue
+
+            # ── 3. لا ترسل إذا العميل رد أو سُجِّل أو أغلق المحادثة ──────
+            profile = get_lead_profile(phone)
             if profile.get("crm_registered") or profile.get("conv_closed"):
                 mark_follow_up_done(fu["id"], notes="عميل مسجّل أو أغلق المحادثة")
                 continue
 
+            # ── 4. إرسال ─────────────────────────────────────────────────────
             msg = _build_message(stage, name)
-
             try:
                 ok = await self.notifier.send_custom_message(phone, msg)
                 if ok:
-                    mark_follow_up_done(fu["id"], notes=f"أُرسل: {stage}")
+                    mark_follow_up_done(fu["id"], notes=f"أُرسل: {stage} | {today}")
                     log_action(
                         "seq_followup",
-                        f"متابعة تلقائية ({stage}) → {name or phone}",
+                        f"متابعة ({stage}) → {name or phone}",
                         "تم الإرسال",
                         fu["lead_id"],
                     )
+                    sent_today.add(phone)
                     sent += 1
                     self._log.info("followup.sent", phone=phone, stage=stage)
                 else:
@@ -200,7 +232,7 @@ class FollowUpEngine:
             except Exception as exc:
                 self._log.error("followup.exception", phone=phone, error=str(exc))
 
-            await asyncio.sleep(0.5)   # avoid flooding WAHA
+            await asyncio.sleep(0.8)   # تجنب flood WAHA
 
         self._log.info("followup.run_complete", sent=sent, checked=len(seq_due))
         return sent
