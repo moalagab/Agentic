@@ -288,6 +288,17 @@ class SmartfieldScheduler:
 
     async def _run_follow_ups(self):
         logger.info("scheduler.running_follow_ups")
+
+        # 1. Pipeline-sequenced follow-ups (WAHA, SQLite-backed — survives restarts)
+        if self.pipeline and hasattr(self.pipeline, "followup_engine"):
+            try:
+                seq_sent = await self.pipeline.followup_engine.run_due_followups()
+                if seq_sent > 0:
+                    logger.info("scheduler.seq_followups_sent", count=seq_sent)
+            except Exception as exc:
+                logger.error("scheduler.seq_followup_error", error=str(exc))
+
+        # 2. Greeting/conversation follow-ups (autonomous agent — SQLite)
         try:
             count = await self.employee.run_proactive_follow_ups()
             if count > 0:
@@ -295,7 +306,7 @@ class SmartfieldScheduler:
         except Exception as exc:
             logger.error("scheduler.follow_up_error", error=str(exc))
 
-        # Creative follow-up sequences (FIX-005)
+        # 3. Creative follow-up sequences with owner approval (Telegram gate)
         if self.creative_followup_engine:
             try:
                 results = await self.creative_followup_engine.run_creative_sequence()

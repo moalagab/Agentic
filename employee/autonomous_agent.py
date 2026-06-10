@@ -340,20 +340,10 @@ class AutonomousEmployee:
                         fu["lead_id"],
                     )
                 else:
-                    # Named/qualified lead follow-up
+                    # Named/qualified lead follow-up — always via WAHA (no Twilio templates)
                     lead_name = fu["lead_name"] or "عزيزي العميل"
-                    if fu["attempts"] == 0 and self.config.TWILIO_FOLLOWUP_TEMPLATE_SID:
-                        sent_ok = await self._send_whatsapp_template(
-                            phone=phone,
-                            content_sid=self.config.TWILIO_FOLLOWUP_TEMPLATE_SID,
-                            variables={"1": lead_name, "2": "سمارت فيلد"},
-                        )
-                        if not sent_ok:
-                            msg = build_follow_up_message(lead_name, fu["attempts"])
-                            await self._send_whatsapp(phone, msg)
-                    else:
-                        msg = build_follow_up_message(lead_name, fu["attempts"])
-                        await self._send_whatsapp(phone, msg)
+                    msg = build_follow_up_message(lead_name, fu["attempts"])
+                    await self._send_whatsapp(phone, msg)
                     # attempt 0 → +2 days; attempt 1 → +3 days; attempt 2+ → stop
                     next_days = None if fu["attempts"] >= 2 else (2 if fu["attempts"] == 0 else 3)
                     mem.mark_follow_up_done(fu["id"], next_days=next_days, notes="تم الإرسال تلقائياً")

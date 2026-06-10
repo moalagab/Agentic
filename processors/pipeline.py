@@ -61,7 +61,7 @@ class LeadPipeline:
 
         # Lazy import to avoid circular imports
         from processors.followup_engine import FollowUpEngine
-        self.followup_engine = FollowUpEngine(config)
+        self.followup_engine = FollowUpEngine(config, notifier=notifier)
 
     async def process(self, lead_create: LeadCreate) -> ProcessedLead:
         """
