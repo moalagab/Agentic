@@ -201,7 +201,8 @@ async def lifespan(app: FastAPI):
                 anthropic_api_key=settings.GEMINI_API_KEY,
                 telegram=_tg_handler,
                 owner_chat_ids=_owner_ids,
-                daily_cap=10,
+                daily_cap=20,
+                batch_size=10,
             )
             _creative_followup = CreativeFollowupEngine(
                 crm=_pipeline.primary_crm,

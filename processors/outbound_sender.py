@@ -44,7 +44,8 @@ class OutboundSender:
         anthropic_api_key: str,
         telegram: Optional["TelegramHandler"] = None,
         owner_chat_ids: Optional[list[str]] = None,
-        daily_cap: int = 10,
+        daily_cap: int = 20,
+        batch_size: int = 10,
     ) -> None:
         self.crm = crm
         self.notifier = notifier
@@ -52,6 +53,7 @@ class OutboundSender:
         self.telegram = telegram
         self.owner_chat_ids = owner_chat_ids or []
         self.daily_cap = daily_cap
+        self.batch_size = batch_size  # max cards per single batch run (morning or evening)
         self.ab_engine = ABTestEngine(crm.client)
         self._log = logger.bind(component="OutboundSender")
 
@@ -79,13 +81,15 @@ class OutboundSender:
             self._log.info("outbound.daily_cap_reached", cap=self.daily_cap)
             return {"status": "cap_reached", "sent_today": today_sent, "cap": self.daily_cap}
 
-        leads = await self._fetch_pending(limit=remaining * 3)  # fetch extra to account for filtered-out dupes
+        # Each batch run sends at most batch_size cards (10 morning, 10 evening)
+        batch_limit = min(self.batch_size, remaining)
+        leads = await self._fetch_pending(limit=batch_limit * 3)  # fetch extra to account for filtered-out dupes
         if not leads:
             self._log.info("outbound.no_pending_leads")
             return {"status": "no_pending", "sent_to_telegram": 0}
 
         # Filter out leads whose phone was already contacted (duplicate records)
-        leads = await self._filter_already_contacted(leads, limit=remaining)
+        leads = await self._filter_already_contacted(leads, limit=batch_limit)
         if not leads:
             self._log.info("outbound.all_pending_already_contacted")
             return {"status": "no_pending", "sent_to_telegram": 0, "note": "all leads already contacted"}
@@ -93,8 +97,9 @@ class OutboundSender:
         self._log.info("outbound.batch_start", total=len(leads))
 
         # Header message
+        session = "صباحية ☀️" if datetime.now().hour < 14 else "مسائية 🌙"
         header = (
-            f"📋 *قائمة الإرسال اليومية — Smart Field*\n"
+            f"📋 *قائمة الإرسال {session} — Smart Field*\n"
             f"{len(leads)} عميل في انتظار موافقتك\n"
             f"الحد اليومي: {today_sent}/{self.daily_cap} مُرسَل\n"
             f"━━━━━━━━━━━━━━━━━━"

@@ -181,12 +181,22 @@ class SmartfieldScheduler:
             name="فحص محتوى عند الإقلاع",
         )
 
-        # Outbound sending — every day at 9:30 AM (after morning prospecting)
+        # Outbound sending — 9:30 AM morning batch (10 leads)
         self.scheduler.add_job(
             self._run_outbound_sender,
             CronTrigger(hour=9, minute=30, timezone=RIYADH_TZ),
-            id="outbound_sender",
-            name="إرسال رسائل الـ Outreach",
+            id="outbound_sender_morning",
+            name="إرسال رسائل الـ Outreach — الصباح",
+            replace_existing=True,
+            misfire_grace_time=600,
+        )
+
+        # Outbound sending — 7:30 PM evening batch (10 leads)
+        self.scheduler.add_job(
+            self._run_outbound_sender,
+            CronTrigger(hour=19, minute=30, timezone=RIYADH_TZ),
+            id="outbound_sender_evening",
+            name="إرسال رسائل الـ Outreach — المساء",
             replace_existing=True,
             misfire_grace_time=600,
         )
@@ -241,7 +251,7 @@ class SmartfieldScheduler:
             misfire_grace_time=60,
         )
 
-        logger.info("scheduler.jobs_registered", count=13)
+        logger.info("scheduler.jobs_registered", count=14)
 
     async def _run_sla_check(self):
         if not self.sla_monitor:
