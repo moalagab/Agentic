@@ -37,6 +37,53 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+def _queue_followup_card(lead_id: str) -> None:
+    """سجّل أن بطاقة موافقة أُرسلت لهذا العميل وبانتظار الرد."""
+    try:
+        from employee.memory import _get_conn
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_actions (action_type, description, result, lead_id, created_at)"
+                " VALUES ('followup_card_queued', 'بطاقة موافقة متابعة أُرسلت', 'pending', ?, ?)",
+                (lead_id, datetime.utcnow().isoformat()),
+            )
+    except Exception:
+        pass
+
+
+def _resolve_followup_card(lead_id: str) -> None:
+    """سجّل أن البطاقة تم البتّ فيها (موافقة أو رفض)."""
+    try:
+        from employee.memory import _get_conn
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_actions (action_type, description, result, lead_id, created_at)"
+                " VALUES ('followup_card_resolved', 'بطاقة موافقة متابعة تمت معالجتها', 'done', ?, ?)",
+                (lead_id, datetime.utcnow().isoformat()),
+            )
+    except Exception:
+        pass
+
+
+def _count_pending_followup_cards() -> int:
+    """
+    عدد بطاقات المتابعة المرسلة ولم يُبَتّ فيها بعد.
+    = عدد queued − عدد resolved
+    """
+    try:
+        from employee.memory import _get_conn
+        with _get_conn() as conn:
+            queued = conn.execute(
+                "SELECT COUNT(*) FROM agent_actions WHERE action_type='followup_card_queued'"
+            ).fetchone()[0]
+            resolved = conn.execute(
+                "SELECT COUNT(*) FROM agent_actions WHERE action_type='followup_card_resolved'"
+            ).fetchone()[0]
+        return max(0, queued - resolved)
+    except Exception:
+        return 0
+
+
 def _was_sent_today(lead_id: str, today: str) -> bool:
     """
     True إذا تم إرسال رسالة متابعة لهذا العميل اليوم مسبقاً.
@@ -307,7 +354,15 @@ class CreativeFollowupEngine:
 
     async def run_creative_sequence(self) -> dict:
         """Fetch follow-up candidates and send Telegram approval cards. Called every 2 hours."""
-        results = {"approval_cards_sent": 0, "marked_lost": 0}
+        results = {"approval_cards_sent": 0, "marked_lost": 0, "blocked": 0}
+
+        # لا ترسل دفعة جديدة إذا لا تزال بطاقات سابقة بانتظار ردك
+        pending = _count_pending_followup_cards()
+        if pending > 0:
+            self._log.info("creative_followup.blocked_pending_approval", pending=pending)
+            results["blocked"] = pending
+            return results
+
         leads = await self._fetch_followup_candidates()
         for lead in leads:
             count = int(lead.get("followup_count") or 0)
@@ -318,6 +373,7 @@ class CreativeFollowupEngine:
             if self._is_due(lead, count):
                 ok = await self._send_approval_card(lead, count)
                 if ok:
+                    _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
                     results["approval_cards_sent"] += 1
         return results
 
@@ -378,6 +434,7 @@ class CreativeFollowupEngine:
         return ok
 
     async def handle_approval(self, lead_id: str, attempt: int, approved: bool) -> str:
+        _resolve_followup_card(lead_id)   # سجّل البتّ بالبطاقة (موافقة أو رفض)
         if not approved:
             return "⏭ تم التخطي"
         lead = await self._get_lead(lead_id)
