@@ -66,6 +66,12 @@ class OutboundSender:
             self._log.warning("outbound.no_telegram_configured")
             return {"status": "no_telegram", "sent_to_telegram": 0}
 
+        # لا ترسل دفعة جديدة إذا لا تزال هناك بطاقات بانتظار ردك
+        awaiting = await self._count_awaiting_approval()
+        if awaiting > 0:
+            self._log.info("outbound.blocked_pending_approval", awaiting=awaiting)
+            return {"status": "awaiting_approval", "awaiting": awaiting}
+
         today_sent = await self._count_today_sent()
         remaining = max(0, self.daily_cap - today_sent)
 
@@ -243,6 +249,21 @@ class OutboundSender:
             except Exception as exc:
                 self._log.error("outbound.fetch_failed", error=str(exc))
                 return []
+
+    async def _count_awaiting_approval(self) -> int:
+        """عدد البطاقات التي أُرسلت للتيليغرام ولم يُبَتّ فيها بعد (BATCH_SENT)."""
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .select("id", count="exact")
+                    .eq("approval_status", "BATCH_SENT")
+                    .execute()
+            )
+            return result.count or 0
+        except Exception:
+            return 0
 
     async def _count_today_sent(self) -> int:
         """Count how many leads were sent today (approval_status=SENT)."""
