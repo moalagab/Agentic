@@ -79,10 +79,16 @@ class OutboundSender:
             self._log.info("outbound.daily_cap_reached", cap=self.daily_cap)
             return {"status": "cap_reached", "sent_today": today_sent, "cap": self.daily_cap}
 
-        leads = await self._fetch_pending(limit=remaining)
+        leads = await self._fetch_pending(limit=remaining * 3)  # fetch extra to account for filtered-out dupes
         if not leads:
             self._log.info("outbound.no_pending_leads")
             return {"status": "no_pending", "sent_to_telegram": 0}
+
+        # Filter out leads whose phone was already contacted (duplicate records)
+        leads = await self._filter_already_contacted(leads, limit=remaining)
+        if not leads:
+            self._log.info("outbound.all_pending_already_contacted")
+            return {"status": "no_pending", "sent_to_telegram": 0, "note": "all leads already contacted"}
 
         self._log.info("outbound.batch_start", total=len(leads))
 
@@ -250,6 +256,61 @@ class OutboundSender:
                 self._log.error("outbound.fetch_failed", error=str(exc))
                 return []
 
+    async def _get_contacted_phones(self) -> set:
+        """Return set of phone numbers that have any non-new record in CRM."""
+        loop = asyncio.get_running_loop()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .select("phone")
+                    .neq("status", "new")
+                    .not_.is_("phone", "null")
+                    .neq("phone", "")
+                    .neq("phone", "+966500000000")
+                    .execute()
+            )
+            return {row["phone"] for row in (result.data or [])}
+        except Exception as exc:
+            self._log.warning("outbound.get_contacted_phones_failed", error=str(exc))
+            return set()
+
+    async def _filter_already_contacted(self, leads: list[dict], limit: int) -> list[dict]:
+        """
+        Remove leads whose phone number already exists in CRM with status != new.
+        Also deduplicates within the batch (same phone appearing twice).
+        """
+        contacted_phones = await self._get_contacted_phones()
+        seen_phones: set = set()
+        filtered: list[dict] = []
+
+        skipped = 0
+        for lead in leads:
+            phone = (lead.get("phone") or "").strip()
+            if not phone:
+                continue
+            if phone in contacted_phones:
+                self._log.info(
+                    "outbound.skip_already_contacted",
+                    name=lead.get("name"), phone=phone,
+                )
+                # Mark duplicate as contacted so it doesn't clog the pipeline
+                await self._update_approval_status(lead["id"], "SENT")
+                skipped += 1
+                continue
+            if phone in seen_phones:
+                skipped += 1
+                continue
+            seen_phones.add(phone)
+            filtered.append(lead)
+            if len(filtered) >= limit:
+                break
+
+        if skipped:
+            self._log.info("outbound.filtered_contacted", skipped=skipped, kept=len(filtered))
+
+        return filtered
+
     async def _count_awaiting_approval(self) -> int:
         """عدد البطاقات التي أُرسلت للتيليغرام ولم يُبَتّ فيها بعد (BATCH_SENT)."""
         loop = asyncio.get_running_loop()
@@ -266,7 +327,8 @@ class OutboundSender:
             return 0
 
     async def _count_today_sent(self) -> int:
-        """Count how many leads were sent today (approval_status=SENT)."""
+        """Count leads actually sent via WhatsApp today.
+        Uses status=contacted to distinguish real sends from duplicate-cleanup records."""
         loop = asyncio.get_running_loop()
         today = date.today().isoformat()
         try:
@@ -275,6 +337,7 @@ class OutboundSender:
                 lambda: self.crm.client.table("leads")
                     .select("id", count="exact")
                     .eq("approval_status", "SENT")
+                    .eq("status", "contacted")
                     .gte("updated_at", today)
                     .execute()
             )
