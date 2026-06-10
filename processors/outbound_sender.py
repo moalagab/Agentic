@@ -90,7 +90,7 @@ class OutboundSender:
         await self._notify_owner(header)
 
         sent_count = 0
-        for lead in leads:
+        for idx, lead in enumerate(leads):
             ok = await self._send_approval_card(lead, idx)
             if ok:
                 await self._update_approval_status(lead["id"], "BATCH_SENT")
