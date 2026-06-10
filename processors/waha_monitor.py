@@ -26,6 +26,7 @@ logger = structlog.get_logger(__name__)
 
 _QR_PAGE_URL = "https://agent.smartfield.sa/qr"
 _ALERT_COOLDOWN_MINUTES = 10
+_MAX_RETRY_BACKOFF_S = 60  # max sleep between retries
 
 
 class WAHAMonitor:
@@ -48,6 +49,8 @@ class WAHAMonitor:
         self.telegram = telegram
         self.owner_chat_ids = owner_chat_ids or []
         self._last_qr_alert: Optional[datetime] = None
+        self._consecutive_failures: int = 0
+        self._last_silent_alert: Optional[datetime] = None
         self._log = logger.bind(component="WAHAMonitor")
 
     # ── Public entry point ────────────────────────────────────────────────────
@@ -94,10 +97,41 @@ class WAHAMonitor:
                 r = await client.get(url, headers={"X-Api-Key": self.api_key})
                 if r.status_code == 404:
                     return None
+                self._consecutive_failures = 0  # reset on success
                 return r.json().get("status")
         except Exception as exc:
-            self._log.warning("waha.get_status_error", error=str(exc))
+            self._consecutive_failures += 1
+            backoff = min(5 * (2 ** self._consecutive_failures), _MAX_RETRY_BACKOFF_S)
+            self._log.warning(
+                "waha.get_status_error",
+                error=str(exc),
+                consecutive_failures=self._consecutive_failures,
+                backoff_s=backoff,
+            )
+            # Alert owner if WAHA is persistently unreachable (3+ failures)
+            if self._consecutive_failures >= 3:
+                await self._maybe_alert_silent_failure()
             return None
+
+    async def _maybe_alert_silent_failure(self) -> None:
+        """Alert owner when WAHA has been unreachable for multiple cycles."""
+        now = datetime.now()
+        if self._last_silent_alert and (now - self._last_silent_alert) < timedelta(minutes=30):
+            return
+        self._last_silent_alert = now
+        msg = (
+            f"🔴 *تحذير: واتساب غير متاح*\n"
+            f"فشل الاتصال بـ WAHA {self._consecutive_failures} مرات متتالية.\n"
+            f"الرجاء التحقق من حاوية Docker.\n"
+            f"`docker ps | grep waha`"
+        )
+        if self.telegram and self.owner_chat_ids:
+            for chat_id in self.owner_chat_ids:
+                try:
+                    await self.telegram.send_message(chat_id, msg)
+                except Exception:
+                    pass
+        self._log.error("waha.persistent_failure_alert_sent", failures=self._consecutive_failures)
 
     async def _start_session(self) -> None:
         url = f"{self.waha_url}/api/sessions/start"

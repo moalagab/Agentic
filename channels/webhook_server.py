@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import OrderedDict
+from collections import OrderedDict  # noqa: F401 — kept for potential future use
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
@@ -25,6 +25,7 @@ from fastapi import (
     BackgroundTasks,
     Depends,
     FastAPI,
+    Header,
     HTTPException,
     Query,
     Request,
@@ -89,9 +90,10 @@ _waha_monitor: Optional[WAHAMonitor] = None
 _backup_engine: Optional[BackupEngine] = None
 _ab_engine: Optional[ABTestEngine] = None
 
-# Deduplication: bounded OrderedDict — O(1) insert + O(1) eviction of oldest
-_processed_wa_ids: OrderedDict[str, None] = OrderedDict()
-_WA_DEDUP_MAX = 500
+# Deduplication: time-window based — message ID → arrival timestamp (float)
+# Messages older than _WA_DEDUP_WINDOW_S seconds are considered expired
+_processed_wa_ids: dict[str, float] = {}
+_WA_DEDUP_WINDOW_S = 30  # 30-second window prevents replays without memory growth
 
 # In-memory lead cache with timestamps for TTL eviction (24h)
 _processed_leads: dict[str, tuple[ProcessedLead, datetime]] = {}
@@ -170,6 +172,9 @@ async def lifespan(app: FastAPI):
         )
         log.info("Proposal approval manager initialized")
 
+    # Resolve owner IDs early — used by WAHA monitor, BackupEngine, and RevOS engines
+    _owner_ids = [str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])]
+
     # Initialize RevOS v6 engines
     _cpq_engine = CPQEngine()
     log.info("CPQ engine initialized")
@@ -195,10 +200,9 @@ async def lifespan(app: FastAPI):
                 notifier=_wa_notifier,
                 anthropic_api_key=settings.GEMINI_API_KEY,
                 telegram=_tg_handler,
-                owner_chat_ids=[str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])],
+                owner_chat_ids=_owner_ids,
                 daily_cap=10,
             )
-            _owner_ids = [str(c) for c in (settings.TELEGRAM_OWNER_CHAT_IDS or [])]
             _creative_followup = CreativeFollowupEngine(
                 crm=_pipeline.primary_crm,
                 notifier=_wa_notifier,
@@ -281,9 +285,9 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["authorization", "content-type", "x-api-key", "x-li-signature"],
 )
 
 
@@ -297,6 +301,23 @@ def get_pipeline() -> LeadPipeline:
 
 def get_settings_dep() -> Settings:
     return get_settings()
+
+
+def require_admin_key(
+    x_api_key: Optional[str] = Header(default=None),
+    settings: Settings = Depends(get_settings_dep),
+) -> None:
+    """Dependency that enforces admin API key on destructive/sensitive endpoints.
+    If ADMIN_API_KEY is not configured, the check is skipped (dev mode).
+    """
+    configured_key = settings.ADMIN_API_KEY
+    if not configured_key:
+        return  # dev mode — no key configured, allow all
+    if x_api_key != configured_key:
+        raise HTTPException(
+            status_code=403,
+            detail="Invalid or missing X-API-Key header",
+        )
 
 
 # ── Pydantic request/response models for the direct API ───────────────────────
@@ -463,6 +484,7 @@ async def get_analytics(
 async def admin_leads_page(
     search: str = Query(default=""),
     stage: str  = Query(default=""),
+    _: None = Depends(require_admin_key),
 ) -> Response:
     """
     Lead management admin page — لوحة إدارة العملاء يدوياً.
@@ -484,7 +506,7 @@ async def admin_leads_page(
 
 
 @app.post("/api/lead/{lead_id}/update", tags=["Leads"])
-async def update_lead_fields(lead_id: str, body: dict) -> dict:
+async def update_lead_fields(lead_id: str, body: dict, _: None = Depends(require_admin_key)) -> dict:
     """Update arbitrary lead fields (notes, priority, revenue, etc.)."""
     try:
         settings = get_settings()
@@ -501,7 +523,7 @@ async def update_lead_fields(lead_id: str, body: dict) -> dict:
 
 
 @app.delete("/api/lead/{lead_id}", tags=["Leads"])
-async def delete_lead(lead_id: str) -> dict:
+async def delete_lead(lead_id: str, _: None = Depends(require_admin_key)) -> dict:
     """Delete a lead by ID."""
     try:
         settings = get_settings()
@@ -540,7 +562,7 @@ async def revenue_dashboard() -> Response:
             # WAHA status
             try:
                 import httpx as _hx
-                r = await asyncio.get_event_loop().run_in_executor(
+                r = await asyncio.get_running_loop().run_in_executor(
                     None,
                     lambda: __import__('httpx').get(
                         'http://localhost:3000/api/sessions/default',
@@ -1130,13 +1152,17 @@ async def whatsapp_webhook(
             or payload.get("id", "")
             or f"{phone}:{text[:40]}"
         )
-        if msg_id and msg_id in _processed_wa_ids:
-            log.debug("WhatsApp duplicate message ignored", msg_id=msg_id)
-            return {"status": "duplicate"}
         if msg_id:
-            _processed_wa_ids[msg_id] = None
-            if len(_processed_wa_ids) > _WA_DEDUP_MAX:
-                _processed_wa_ids.popitem(last=False)  # evict oldest, O(1)
+            import time as _time
+            now_ts = _time.monotonic()
+            # Evict expired entries (older than window) on each check — O(n) but infrequent
+            expired = [k for k, ts in _processed_wa_ids.items() if now_ts - ts > _WA_DEDUP_WINDOW_S]
+            for k in expired:
+                del _processed_wa_ids[k]
+            if msg_id in _processed_wa_ids:
+                log.debug("WhatsApp duplicate message ignored", msg_id=msg_id)
+                return {"status": "duplicate"}
+            _processed_wa_ids[msg_id] = now_ts
 
         name = raw_message.get("name", "عميل")
         log.info("WhatsApp message received", phone=phone, length=len(text))
@@ -1413,7 +1439,7 @@ async def _handle_telegram_callback(cq: dict):
 # ─── Nightly Backup API ───────────────────────────────────────────────────────
 
 @app.post("/api/backup/run", tags=["Backup"])
-async def run_backup_now():
+async def run_backup_now(_: None = Depends(require_admin_key)):
     if not _backup_engine:
         return {"error": "BackupEngine not initialized"}
     result = await _backup_engine.run_nightly_backup()

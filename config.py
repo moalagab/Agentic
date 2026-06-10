@@ -114,6 +114,12 @@ class Settings(BaseSettings):
         description="List of sales team WhatsApp numbers (e.g. +966501234567)"
     )
 
+    # ─── Admin API Security ───────────────────────────────────────────────────
+    ADMIN_API_KEY: str = Field(
+        default="",
+        description="Secret key for admin/destructive endpoints (set a strong random value in production)"
+    )
+
     # ─── Server ──────────────────────────────────────────────────────────────
     APP_HOST: str = Field(default="0.0.0.0", description="Server bind host")
     APP_PORT: int = Field(default=8000, description="Server bind port")

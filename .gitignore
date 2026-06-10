@@ -7,3 +7,16 @@ __pycache__/
 venv/
 *.egg-info/
 .DS_Store
+
+# Node.js
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# Screenshots & debug
+hs_*.png
+*.log
+
+# HubSpot setup artifacts
+hubspot_setup.mjs
+dashboard_test.html

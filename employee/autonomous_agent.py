@@ -612,8 +612,18 @@ class AutonomousEmployee:
                         f"📝 ملاحظات: {notes}\n\n"
                         f"➡️ *تواصل مع العميل مباشرة لتقديم العرض*"
                     )
-                    for chat_id in self.owner_ids:
-                        asyncio.create_task(self.telegram.send_message(chat_id, msg))
+                    telegram_ok = False
+                    for chat_id in self._owner_telegram_ids:
+                        try:
+                            asyncio.create_task(self.telegram.send_message(chat_id, msg))
+                            telegram_ok = True
+                        except Exception:
+                            pass
+                    # Fallback: notify sales team via WhatsApp if Telegram failed
+                    if not telegram_ok and self.config.SALES_TEAM_WHATSAPP:
+                        plain = msg.replace("*", "").replace("_", "")
+                        for sales_phone in self.config.SALES_TEAM_WHATSAPP:
+                            asyncio.create_task(self.notifier.send_custom_message(sales_phone, plain))
                     quote_result = "تم إبلاغ فريقنا بطلبك — سيتواصلون معك قريباً بعرض مفصّل."
                     return {"status": "تم إبلاغ المالك بطلب السعر."}
                 except Exception as exc:
@@ -808,24 +818,40 @@ class AutonomousEmployee:
     async def _update_profile_from_message(
         self, phone: str, message: str, profile: dict, lead_registered: bool
     ) -> None:
-        """Lightly parse message to update profile fields without calling Claude."""
-        if lead_registered:
-            return
+        """Lightly parse message to update profile fields without calling Claude.
+        Always runs — even after registration — to capture later clarifications."""
         text = message.lower()
         updates: dict[str, Any] = {}
 
-        # Simple keyword cargo detection
+        # Cargo type — allow override even after registration
         cargo_map = {
             "دجاج": "دواجن", "لحم": "لحوم", "سمك": "مأكولات بحرية",
             "خضار": "خضروات", "فاكهة": "فواكه", "ألبان": "منتجات ألبان",
             "مجمد": "منتجات مجمدة", "دواء": "أدوية", "صيدل": "صيدلانيات",
             "طبي": "مستلزمات طبية",
+            # English
+            "chicken": "دواجن", "meat": "لحوم", "fish": "مأكولات بحرية",
+            "pharma": "صيدلانيات", "medicine": "أدوية", "frozen": "منتجات مجمدة",
+            "dairy": "منتجات ألبان",
         }
-        if not profile.get("cargo_type"):
-            for kw, ct in cargo_map.items():
-                if kw in text:
-                    updates["cargo_type"] = ct
-                    break
+        for kw, ct in cargo_map.items():
+            if kw in text:
+                updates["cargo_type"] = ct
+                break
+
+        # Fleet size — extract numbers near truck keywords
+        import re as _re
+        fleet_match = _re.search(r"(\d+)\s*(?:شاحن|عربي|truck|vehicle|차)", text)
+        if fleet_match and not profile.get("fleet_size"):
+            updates["fleet_size"] = int(fleet_match.group(1))
+
+        # Budget extraction
+        budget_match = _re.search(r"(\d[\d,]+)\s*(?:ريال|sar|sr)", text)
+        if budget_match and not profile.get("budget"):
+            try:
+                updates["budget"] = float(budget_match.group(1).replace(",", ""))
+            except ValueError:
+                pass
 
         if updates:
             mem.update_lead_profile(phone, **updates)

@@ -83,7 +83,31 @@ class LeadPipeline:
 
         log.info("Pipeline started")
 
-        # ── Step 1: Hybrid Scoring (rule-based FIRST, locked before Claude) ──
+        # ── Step 1: Dedup check FIRST (skip scoring cost on known leads) ──────
+        existing_crm_id: str | None = None
+        try:
+            existing = await self._check_duplicate(lead_create)
+            if existing:
+                existing_crm_id = existing.crm_id
+                log.info(
+                    "Duplicate lead found — skipping full pipeline",
+                    existing_crm_id=existing_crm_id,
+                    existing_score=existing.score,
+                )
+                # Return early for exact duplicates (same phone already in CRM)
+                from models.lead import LeadCategory, LeadPriority
+                dup_lead = existing
+                return ProcessedLead(
+                    lead=dup_lead,
+                    classification_reasoning="مكرر — العميل موجود مسبقاً في CRM",
+                    next_actions=["تحديث السجل الموجود إن لزم"],
+                    crm_saved=True,
+                    notification_sent=False,
+                )
+        except Exception as exc:
+            log.warning("Duplicate check failed", error=str(exc))
+
+        # ── Step 2: Hybrid Scoring (rule-based — fast, no API calls) ──────────
         from processors.hybrid_scorer import HybridScorer
         hybrid_scorer = HybridScorer()
         try:
@@ -109,20 +133,6 @@ class LeadPipeline:
         except Exception as exc:
             log.warning("Hybrid scoring failed, using fallback", error=str(exc))
             pre_class = {"score": 30, "category": "other", "priority": "medium"}
-
-        # ── Step 2: Check for duplicates ──────────────────────────────────────
-        existing_crm_id: str | None = None
-        try:
-            existing = await self._check_duplicate(lead_create)
-            if existing:
-                existing_crm_id = existing.crm_id
-                log.info(
-                    "Duplicate lead found",
-                    existing_crm_id=existing_crm_id,
-                    existing_score=existing.score,
-                )
-        except Exception as exc:
-            log.warning("Duplicate check failed", error=str(exc))
 
         # ── Step 3: Run through AI agent (Claude) ────────────────────────────
         try:
