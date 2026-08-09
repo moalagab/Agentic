@@ -50,39 +50,64 @@ KNOWN_ROUTES: dict[tuple[str, str], int] = {
 }
 
 # ─── Vehicle Pricing ──────────────────────────────────────────────────────────
+#
+# cost_basis holds REAL operating costs for the SMALL VAN specifically
+# (confirmed by Mo 2026-08-04/09, cross-checked against AI-BOS's independent
+# bottom-up Meal Run pricing derivation in the vault — the two agree once the
+# margin formula below is applied). There is still no rented vehicle as of
+# this date; these are the figures Smart Field would actually pay once one is.
+#
+#   vehicle_rental_monthly : 3,500 SAR/month — small refrigerated van, no driver
+#   driver_salary_monthly  : 2,000 SAR/month
+#   fuel_sar_per_km        : diesel, 1.79 SAR/L (Aramco 2026 price, reviewed
+#                             annually) at ~13 L/100km consumption ⇒ ~0.23 SAR/km
+#
+# medium_truck / large_truck / reefer_trailer still have no cost_basis —
+# calculate() refuses to quote those tiers (raises, does not fabricate) until
+# real numbers are supplied here. Do NOT fill them in by scaling small_van's
+# numbers by capacity — that is a guess, not data.
+#
+# RESERVE_PERCENT / MARGIN_PERCENT: reserve is added to direct cost first
+# (maintenance, driver absence, etc.), then price is derived so MARGIN_PERCENT
+# is a share of REVENUE, not a markup on cost:
+#   price = (direct_cost * (1 + RESERVE_PERCENT)) / (1 - MARGIN_PERCENT)
+# This matches the methodology already validated against real numbers in the
+# Meal Run pricing (see company-profile.md — 30km route: 218.5 SAR direct
+# cost -> 251.3 with 15% reserve -> 335 SAR at 25% margin, reproduced exactly
+# by this formula). MARGIN_PERCENT's value (30%) is still a placeholder for
+# general CPQ trips — Mo confirmed 25-35% specifically for Meal Run routes;
+# confirm before treating 30% as final for non-Meal-Run quotes too.
+RESERVE_PERCENT = 0.15
+MARGIN_PERCENT = 0.30
+FUEL_SAR_PER_KM = 0.23  # diesel, ~13 L/100km, 1.79 SAR/L (Aramco 2026)
 
 VEHICLE_CONFIG = {
     "small_van": {
         "name_ar": "فان مبرد صغير",
         "capacity_kg": 1000,
         "capacity_m3": 8,
-        "base_rate": 350,          # SAR per trip (city)
-        "per_km_rate": 1.2,        # SAR per km
-        "min_trip": 350,
+        "cost_basis": {
+            "vehicle_rental_monthly": 3500,
+            "driver_salary_monthly": 2000,
+        },
     },
     "medium_truck": {
         "name_ar": "شاحنة متوسطة",
         "capacity_kg": 5000,
         "capacity_m3": 30,
-        "base_rate": 700,
-        "per_km_rate": 1.8,
-        "min_trip": 700,
+        "cost_basis": None,  # NEEDS REAL COST DATA
     },
     "large_truck": {
         "name_ar": "شاحنة كبيرة",
         "capacity_kg": 15000,
         "capacity_m3": 80,
-        "base_rate": 1200,
-        "per_km_rate": 2.5,
-        "min_trip": 1200,
+        "cost_basis": None,  # NEEDS REAL COST DATA
     },
     "reefer_trailer": {
         "name_ar": "مقطورة مبردة",
         "capacity_kg": 25000,
         "capacity_m3": 120,
-        "base_rate": 2000,
-        "per_km_rate": 3.5,
-        "min_trip": 2000,
+        "cost_basis": None,  # NEEDS REAL COST DATA
     },
 }
 
@@ -167,7 +192,7 @@ class CPQEngine:
         self,
         route_from: str,
         route_to: str,
-        vehicle_type: str = "medium_truck",
+        vehicle_type: str = "small_van",
         temperature_zone: str = "chilled",
         frequency_per_month: int = 1,
         urgency: str = "normal",
@@ -182,6 +207,8 @@ class CPQEngine:
             route_from: Origin city
             route_to: Destination city
             vehicle_type: small_van / medium_truck / large_truck / reefer_trailer
+                          (only small_van has real cost data as of 2026-08-09 —
+                          the others raise ValueError instead of guessing a price)
             temperature_zone: chilled / frozen / pharma
             frequency_per_month: Number of trips per month
             urgency: normal / express / urgent
@@ -197,31 +224,53 @@ class CPQEngine:
         vehicle_type = self._resolve_vehicle(vehicle_type, volume_m3, weight_kg)
 
         # ── Validate inputs ───────────────────────────────────────────────────
-        vehicle = VEHICLE_CONFIG.get(vehicle_type, VEHICLE_CONFIG["medium_truck"])
+        vehicle = VEHICLE_CONFIG.get(vehicle_type, VEHICLE_CONFIG["small_van"])
         temp_cfg = TEMP_PREMIUMS.get(temperature_zone, TEMP_PREMIUMS["chilled"])
         urgency_mult = URGENCY_MULTIPLIERS.get(urgency, 1.0)
-        freq_discount = calculate_frequency_discount(frequency_per_month)
 
-        # ── Calculate base trip cost ──────────────────────────────────────────
-        is_intercity = distance_km > 60
+        cost_basis = vehicle.get("cost_basis")
+        if cost_basis is None:
+            # Refuse to fabricate a price. See the VEHICLE_CONFIG comment —
+            # only small_van has real operating costs as of 2026-08-09.
+            raise ValueError(
+                f"No real cost data for vehicle_type='{vehicle_type}' — "
+                "refusing to generate a quote with a guessed price. Add "
+                "cost_basis (vehicle_rental_monthly, driver_salary_monthly) "
+                "to VEHICLE_CONFIG for this tier first."
+            )
 
-        if is_intercity:
-            base_trip_rate = vehicle["base_rate"]
-            distance_cost = distance_km * vehicle["per_km_rate"]
-        else:
-            # City delivery — flat base rate
-            base_trip_rate = vehicle["base_rate"]
-            distance_cost = distance_km * (vehicle["per_km_rate"] * 0.6)  # city multiplier
+        # ── Calculate base trip cost from real operating costs ─────────────────
+        # cost_per_trip = fixed monthly costs / trips  +  distance * diesel rate.
+        # This replaces the old flat base_rate + per_km_rate guess. Dividing
+        # the fixed cost by frequency_per_month means cost-per-trip naturally
+        # falls as trip volume rises (the real economics behind a volume
+        # discount), so the old calculate_frequency_discount() schedule is
+        # NOT reapplied here — stacking it on top would double-count the
+        # same effect.
+        trips = max(frequency_per_month, 1)
 
-        raw_trip_cost = max(base_trip_rate + distance_cost, vehicle["min_trip"])
+        fixed_monthly = (
+            cost_basis["vehicle_rental_monthly"] + cost_basis["driver_salary_monthly"]
+        )
+
+        base_trip_rate = fixed_monthly / trips           # fixed cost share for this trip
+        distance_cost = distance_km * FUEL_SAR_PER_KM     # actual diesel cost for this trip
+        raw_trip_cost = base_trip_rate + distance_cost
+
+        # ── Apply reserve, then margin as a share of revenue ────────────────────
+        # price = (direct_cost * (1 + RESERVE_PERCENT)) / (1 - MARGIN_PERCENT)
+        # NOT direct_cost * (1 + MARGIN_PERCENT) — see the VEHICLE_CONFIG
+        # comment for why (margin-of-revenue vs markup-on-cost are different
+        # numbers for the same nominal percentage; this formula is the one
+        # validated against real Meal Run route pricing).
+        raw_trip_cost = (raw_trip_cost * (1 + RESERVE_PERCENT)) / (1 - MARGIN_PERCENT)
 
         # ── Apply premiums ────────────────────────────────────────────────────
         after_temp = raw_trip_cost * temp_cfg["multiplier"]
         after_urgency = after_temp * urgency_mult
 
-        # ── Apply frequency discount ──────────────────────────────────────────
-        price_per_trip = round(after_urgency * freq_discount, -1)  # round to nearest 10 SAR
-        price_per_trip = max(price_per_trip, vehicle["min_trip"])
+        freq_discount = 1.0  # already reflected via trips-based division above
+        price_per_trip = round(after_urgency, -1)  # round to nearest 10 SAR
 
         monthly_estimate = round(price_per_trip * frequency_per_month, -2)
         annual_estimate = monthly_estimate * 12

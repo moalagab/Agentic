@@ -17,12 +17,15 @@ COMPANY = {
     "hq": "الرياض، المملكة العربية السعودية",
     "certifications": ["ISO 22000", "HACCP", "GAP Saudi"],
     "website": "smartfield.sa",
+    # NOTE (2026-08-09): Smart Field does not currently have a rented vehicle
+    # (confirmed in AI-BOS Operating Context, discovered 2026-08-04). Do not
+    # add claims here that imply an existing fleet is ready to dispatch —
+    # vehicles are mobilized after a qualifying contract is signed.
     "strengths": [
-        "أسطول حديث من شاحنات Thermo King",
-        "تتبع GPS لحظة بلحظة لكل شحنة",
+        "تجهيز مركبة مبردة مخصصة عند توقيع العقد (شبكة موردين معتمدين)",
+        "نظام تتبع GPS وتقرير درجة الحرارة مع كل شحنة",
         "سائقون مدرّبون على سلسلة التبريد",
-        "تقارير درجة الحرارة عند التسليم",
-        "تغطية الرياض وجميع المناطق الرئيسية",
+        "تغطية الرياض وقابلية التوسّع للمناطق الرئيسية",
         "نظام CRM متكامل لتتبع الشحنات",
     ],
 }
@@ -42,11 +45,20 @@ SERVICES = {
         "suitable_for": ["لحوم مجمدة", "بوظة وآيسكريم", "دواجن مجمدة", "مأكولات بحرية مجمدة"],
         "min_load": "100 كغ",
     },
-    "pharma_transport": {
-        "name_ar": "نقل صيدلاني",
-        "temp_range": "+2°C إلى +8°C",
-        "suitable_for": ["أدوية", "لقاحات", "مستحضرات حيوية", "مستلزمات طبية حساسة"],
-        "special": "وثائق سلسلة التبريد الكاملة مع كل شحنة",
+    # pharma_transport removed 2026-08-09 — legally prohibited for Smart
+    # Field (no SFDA carrier license + GDP requirements not met), not just
+    # deprioritized. Do not re-add without an actual carrier license.
+    "meal_run": {
+        "name_ar": "Meal Run — خط توزيع اشتراكات وجبات",
+        "description": (
+            "خط توزيع صباحي/مسائي ثابت يمر على مشتركي مطعم صحي أو مزوّد "
+            "خدمة وجبات/اشتراك غذائي واحد (له أكثر من مشترك) ضمن نطاق "
+            "جغرافي متقارب. العقد والفاتورة مع تلك المنشأة فقط — بيوت "
+            "المشتركين محطات توقف، لا عقود فردية أبدًا."
+        ),
+        "suitable_for": ["مطاعم صحية", "شركات ومزوّدي اشتراك وجبات صحية/دايت", "خطط غذائية بتوصيل يومي"],
+        "requires": "عدد مشتركين + تركّز جغرافي (حي واحد أو أحياء متجاورة) — التركّز يحسم الجدوى لا العدد وحده",
+        "added": "2026-08-04",
     },
     "dedicated_fleet": {
         "name_ar": "أسطول مخصص",
@@ -61,6 +73,10 @@ SERVICES = {
 }
 
 # ─── Vehicle Types ─────────────────────────────────────────────────────────────
+# Capacities describe what CAN be arranged once a client signs, not vehicles
+# currently on hand. No rate_per_trip here — Smart Field has no rented
+# vehicle today, so any trip price would be a guess with no real cost basis.
+# Pricing is quoted per-client via the CPQ engine after qualification.
 
 VEHICLES = {
     "small_van": {
@@ -68,28 +84,24 @@ VEHICLES = {
         "capacity_kg": 1000,
         "capacity_m3": 8,
         "suitable_for": "توصيل داخل المدينة، كميات صغيرة",
-        "rate_per_trip": "350-550 ريال",
     },
     "medium_truck": {
         "name_ar": "شاحنة متوسطة",
         "capacity_kg": 5000,
         "capacity_m3": 30,
         "suitable_for": "نقل بين المدن، مصانع، مطاعم",
-        "rate_per_trip": "700-1200 ريال",
     },
     "large_truck": {
         "name_ar": "شاحنة كبيرة",
         "capacity_kg": 15000,
         "capacity_m3": 80,
         "suitable_for": "كميات كبيرة، عقود شهرية، مستودعات",
-        "rate_per_trip": "1200-2500 ريال",
     },
     "reefer_trailer": {
         "name_ar": "مقطورة مبردة",
         "capacity_kg": 25000,
         "capacity_m3": 120,
         "suitable_for": "الشحنات الكبيرة جداً، عقود طويلة الأمد",
-        "rate_per_trip": "2000-4500 ريال",
     },
 }
 
@@ -106,16 +118,24 @@ COVERAGE = {
         "response_time": "خلال 24 ساعة",
         "availability": "أيام العمل",
     },
+    # Distance/time are geographic facts; no rate here — see VEHICLES note.
     "routes": {
-        "riyadh_dammam": {"distance_km": 400, "est_time_hrs": 4, "rate_medium": 900},
-        "riyadh_jeddah": {"distance_km": 950, "est_time_hrs": 9, "rate_medium": 1800},
-        "jeddah_mecca":  {"distance_km": 80,  "est_time_hrs": 1, "rate_medium": 450},
-        "riyadh_qassim": {"distance_km": 320, "est_time_hrs": 3, "rate_medium": 750},
-        "dammam_jubail": {"distance_km": 100, "est_time_hrs": 1, "rate_medium": 500},
+        "riyadh_dammam": {"distance_km": 400, "est_time_hrs": 4},
+        "riyadh_jeddah": {"distance_km": 950, "est_time_hrs": 9},
+        "jeddah_mecca":  {"distance_km": 80,  "est_time_hrs": 1},
+        "riyadh_qassim": {"distance_km": 320, "est_time_hrs": 3},
+        "dammam_jubail": {"distance_km": 100, "est_time_hrs": 1},
     },
 }
 
 # ─── Pricing Rules ─────────────────────────────────────────────────────────────
+# No indicative SAR figures here by design — Smart Field has no rented
+# vehicle today (see COMPANY note above), so a quoted number would have no
+# real cost basis. Per AI-BOS's 2026-08-04 decision, vehicle rental is
+# financed BACKWARDS from a signed commitment, not the other way around:
+# a vehicle is mobilized only after a client signs a qualifying contract
+# (monthly-recurring or 3-month minimum). Every quote must say so explicitly
+# and must NOT promise immediate start.
 
 PRICING = {
     "model": "per_trip",  # or "monthly_retainer"
@@ -125,19 +145,47 @@ PRICING = {
         "درجة الحرارة المطلوبة",
         "الكمية (كغ أو م³)",
         "تردد الرحلات",
+        "الالتزام التعاقدي (اشتراك شهري متجدد أو 3 أشهر كحد أدنى)",
     ],
     "discounts": {
-        "monthly_contract": "10-15% خصم على عقود شهرية",
-        "volume_above_20": "5% خصم إضافي على 20+ رحلة شهرياً",
-        "annual_contract": "20% خصم على العقود السنوية",
+        "monthly_contract": "خصم على عقود شهرية — يُحدَّد بعد التقييم",
+        "annual_contract": "خصم إضافي على العقود السنوية",
     },
-    "indicative_rates": {
-        "city_delivery_small": "350-550 ريال/رحلة (داخل الرياض)",
-        "intercity_medium": "700-1800 ريال/رحلة (بين المدن الرئيسية)",
-        "monthly_dedicated": "8000-25000 ريال/شهر (شاحنة مخصصة)",
-        "pharma_premium": "زيادة 20-30% على الأسعار العادية",
-    },
-    "note": "الأسعار تقديرية — السعر الدقيق يعتمد على تفاصيل الشحنة والمسار",
+    "commitment_required": (
+        "لا تُجهَّز أي مركبة قبل توقيع عقد بحد أدنى للالتزام "
+        "(اشتراك شهري متجدد أو 3 أشهر). يوجد فارق زمني بين التوقيع "
+        "وبدء الخدمة الفعلي لتجهيز المركبة — يجب توضيحه للعميل صراحة."
+    ),
+    "note": "لا نعطي رقمًا نهائيًا في المحادثة — السعر الدقيق يُصدر عبر عرض رسمي بعد تفاصيل الشحنة والمسار.",
+}
+
+# ─── Meal Run Pricing (real numbers — confirmed by Mo, 2026-08-04/09) ─────────
+# Route-based, NOT per-trip like the general PRICING above. Built bottom-up
+# from real small-van costs (see processors/cpq_engine.py) + 15% reserve +
+# 25-35% margin. Still never state these numbers directly in conversation —
+# same rule as PRICING["note"] — but they are the real basis for what the
+# sales team quotes, unlike the general per-trip figures which stay
+# deliberately number-free until CPQ runs.
+MEAL_RUN_PRICING = {
+    "unit": "per_route_per_day",  # NOT per subscriber, NOT per trip
+    "tiers": [
+        {
+            "range_ar": "حي واحد أو حيّان متجاوران، حتى 15 محطة",
+            "sar_per_day": "180-250",
+            "note": "لا يزال مبنيًا على سعر الرحلة العام — يُعاد حسابه بمنهجية bottom-up عند أول عميل فعلي بهذا الحجم",
+        },
+        {
+            "range_ar": "نطاق أوسع (3+ أحياء) أو 16-30 محطة",
+            "sar_per_day": "340-400",
+            "note": "يغطي هامش ربح 25-35% فوق التكلفة الفعلية + احتياطي 15%، محسوب بدقة",
+        },
+        {
+            "range_ar": "متفرق جغرافيًا (يحتاج خطين أو أكثر)",
+            "sar_per_day": None,
+            "note": "غالبًا غير مجدٍ اقتصاديًا — التركّز الجغرافي هو المتغير الحاسم، يُسعَّر كخطين منفصلين إن أُصر عليه",
+        },
+    ],
+    "rule": "التسعير بالخط لا بالمشترك. لا عقد ولا فاتورة مباشرة مع أي مشترك فردي — العقد مع المطعم الصحي أو مزوّد خدمة الوجبات نفسه فقط.",
 }
 
 # ─── FAQ ──────────────────────────────────────────────────────────────────────
@@ -149,15 +197,23 @@ FAQ = [
     },
     {
         "q": "كم يكلف نقل دجاج من الرياض للدمام؟",
-        "a": "شاحنة متوسطة الرياض–الدمام (400 كم) تبدأ من 850 ريال. يعتمد على الوزن والتردد.",
+        "a": "يعتمد على الوزن والتردد ونوع المركبة — أرسل التفاصيل ونجهّز لك عرض سعر رسمي.",
     },
     {
         "q": "هل عندكم وثائق سلسلة التبريد للأدوية؟",
-        "a": "نعم، نوفر logger درجة الحرارة وتقرير كامل مع كل شحنة صيدلانية.",
+        "a": "لا نغطي قطاع الأدوية حاليًا — هذا خارج نطاق ترخيصنا كناقل، لا مجرد قرار تسويقي. نركّز على الأغذية.",
+    },
+    {
+        "q": "أنا مشترك في خطة وجبات صحية، تقدرون توصلون وجباتي أنا شخصيًا؟",
+        "a": "لا نتعاقد مباشرة مع أفراد — نتعاقد مع المطعم الصحي أو مزوّد خدمة الوجبات نفسه لخدمة خط توصيل كامل لمشتركيه. اسأل مزوّد وجبتك إن كان يتعامل مع Smart Field.",
+    },
+    {
+        "q": "أنا صاحب مطعم صحي/مزوّد اشتراك وجبات، كيف تسعّرون خدمة التوصيل؟",
+        "a": "نسعّر بالخط لا بالمشترك — أرسل عدد المشتركين ونطاقهم الجغرافي (حي واحد أفضل) ونجهّز لك عرض Meal Run رسمي.",
     },
     {
         "q": "هل يمكن عقد شهري؟",
-        "a": "بالتأكيد — العقود الشهرية توفر 10-15%، والسنوية توفر حتى 20%.",
+        "a": "بالتأكيد — العقود الشهرية والسنوية توفر خصمًا يُحدَّد بعد التقييم، وهي أيضًا الحد الأدنى للالتزام المطلوب قبل تجهيز أي مركبة.",
     },
     {
         "q": "ما هي أقل كمية؟",
@@ -169,55 +225,37 @@ FAQ = [
     },
     {
         "q": "كم وقت تحتاج لتجهيز شاحنة؟",
-        "a": "في الرياض: 2-4 ساعات للطلبات العاجلة. للمسبوقة: الحجز المسبق بيوم.",
+        "a": "بعد توقيع العقد نجهّز المركبة المناسبة — المدة تُحدَّد عند التعاقد ونوضّحها لك قبل التوقيع.",
     },
 ]
 
 # ─── Case Studies ─────────────────────────────────────────────────────────────
-
-CASE_STUDIES = [
-    {
-        "client_type": "مصنع دواجن — الرياض",
-        "challenge": "احتاج لنقل 8 طن دجاج يومياً لأكثر من 15 نقطة توزيع",
-        "solution": "4 شاحنات مخصصة بعقد شهري مع جدول توزيع ثابت",
-        "result": "تقليل الهدر 40%، توفير 15% تكلفة مقارنة بالسابق",
-        "monthly_value": "42,000 ريال/شهر",
-    },
-    {
-        "client_type": "شركة أدوية — جدة",
-        "challenge": "نقل لقاحات تتطلب +2 إلى +8 درجة مع توثيق كامل",
-        "solution": "شاحنة مخصصة مع logger مستمر وتقارير يومية",
-        "result": "صفر انتهاك لسلسلة التبريد على مدى 18 شهراً",
-        "monthly_value": "28,000 ريال/شهر",
-    },
-    {
-        "client_type": "سلسلة مطاعم — الرياض وجدة",
-        "challenge": "توصيل مكونات طازجة لـ 22 فرعاً يومياً",
-        "solution": "نظام توزيع داخل المدينة 6 أيام أسبوعياً",
-        "result": "تحسين طزاجة المنتج، انخفاض الشكاوى 70%",
-        "monthly_value": "35,000 ريال/شهر",
-    },
-]
+# Removed 2026-08-09: these three entries (poultry factory, pharma company,
+# restaurant chain — 42k/28k/35k SAR monthly) did not correspond to any real
+# client in the pipeline and were being presented to prospects as social
+# proof. Do not re-add invented clients/results/values here — only use real,
+# named case studies once Smart Field has them.
+CASE_STUDIES: list[dict] = []
 
 # ─── Knowledge Base as formatted text (for Claude prompt injection) ───────────
 
 def get_kb_text() -> str:
     """Return a concise knowledge base string to inject into Claude's system prompt."""
     routes_text = "\n".join(
-        f"  {k.replace('_', '→')}: {v['rate_medium']} ريال تقريباً ({v['distance_km']} كم)"
+        f"  {k.replace('_', '→')}: {v['distance_km']} كم (~{v['est_time_hrs']} ساعة)"
         for k, v in COVERAGE["routes"].items()
     )
     faq_text = "\n".join(
         f"  س: {f['q']}\n  ج: {f['a']}"
         for f in FAQ[:5]
     )
-    case_text = "\n".join(
-        f"  {c['client_type']}: {c['result']} — {c['monthly_value']}"
-        for c in CASE_STUDIES
-    )
     vehicles_text = "\n".join(
-        f"  {v['name_ar']}: حتى {v['capacity_kg']} كغ — {v['rate_per_trip']}"
+        f"  {v['name_ar']}: حتى {v['capacity_kg']} كغ"
         for v in VEHICLES.values()
+    )
+    meal_run_text = "\n".join(
+        f"  {t['range_ar']}: {t['sar_per_day'] + ' ريال/يوم' if t['sar_per_day'] else 'يُسعَّر كخطين منفصلين'} — {t['note']}"
+        for t in MEAL_RUN_PRICING["tiers"]
     )
 
     return f"""
@@ -226,39 +264,51 @@ def get_kb_text() -> str:
 ### الخدمات
 - نقل مبرد: -2°C إلى +8°C (لحوم، ألبان، خضار، سمك)
 - نقل مجمد: -18°C إلى -25°C (لحوم مجمدة، آيسكريم)
-- نقل صيدلاني: +2°C إلى +8°C مع توثيق كامل
-- أسطول مخصص بعقود شهرية
+- Meal Run: خط توزيع لمطعم صحي أو مزوّد خدمة اشتراك وجبات — راجع القسم أدناه، شرط حاسم قبل أي رد
+- أسطول يُجهَّز عند التعاقد — لا يوجد أسطول جاهز حاليًا
 
-### أنواع الشاحنات والأسعار
+### أنواع المركبات المتاحة عند التعاقد (بدون أسعار — تُحدَّد لكل عميل)
 {vehicles_text}
 
-### أسعار المسارات الرئيسية (تقديرية)
+### المسارات الرئيسية (مسافة/وقت فقط — لا أسعار تقديرية)
 {routes_text}
 
-### الخصومات
-- عقد شهري: 10-15%
-- 20+ رحلة/شهر: 5% إضافي
-- عقد سنوي: 20%
+### شرط أساسي قبل أي عرض
+{PRICING["commitment_required"]}
+
+### Meal Run — قواعد حاسمة (معظم الطلبات الحالية من هذا النوع)
+{MEAL_RUN_PRICING["rule"]}
+تصنيف الطلب: هل التعاقد مع **منشأة** — مطعم صحي أو مزوّد خدمة وجبات (مقبول) — أم **فرد واحد** يطلب توصيل وجباته الخاصة (مرفوض — وجّهه لمزوّد وجبته)؟
+جدول الأسعار الداخلي (لا تذكر رقمًا للعميل مباشرة — للفريق فقط):
+{meal_run_text}
 
 ### أبرز الأسئلة والأجوبة
 {faq_text}
 
-### نماذج من عملائنا
-{case_text}
-
 ### ملاحظة
-الأسعار تقديرية. دائماً أخبر العميل أن السعر الدقيق يتطلب تفاصيل الشحنة.
+لا تذكر أبدًا رقمًا أو نطاق سعر محدد في المحادثة، ولا تعد بمركبة جاهزة أو بدء فوري.
+السعر الدقيق ومدة التجهيز تصدر فقط عبر عرض رسمي بعد جمع تفاصيل الشحنة، ويشترط
+حد أدنى للالتزام (اشتراك شهري متجدد أو 3 أشهر) قبل تجهيز أي مركبة. الأدوية
+والمستلزمات الطبية محظورة قانونيًا (لا ترخيص ناقل SFDA) — ارفضها دائمًا بأدب.
 """.strip()
 
 
 def get_scoring_context() -> str:
-    """Return scoring weights context for the agent."""
+    """Return scoring weights context for the agent.
+
+    Pharma/pharmacy was removed 2026-08-09 — legally prohibited (no SFDA
+    carrier license), matching processors/icp_engine.py, which excludes
+    pharma_beauty from ICP scoring entirely regardless of any other factor.
+    Meal Run (meal_subscription) added 2026-08-09 — officially approved B2B
+    segment 2026-08-04; only counts if the contract is with the meal
+    company, never a single individual subscriber.
+    """
     return """
 ## جدول التقييم — Rule-Based Score
 
 | العامل | النقاط |
 |---|---|
-| صيدليات / موزع أدوية | 25 |
+| Meal Run (عقد B2B مع شركة وجبات، خط بمشتركين مُجمَّعين) | 23 |
 | مجمدات / لحوم | 22 |
 | أغذية طازجة | 20 |
 | سلاسل تجزئة | 16 |
@@ -267,6 +317,7 @@ def get_scoring_context() -> str:
 | أكثر من 10 شاحنات | +20 |
 | طلب عاجل | +15 |
 | ميزانية >50k ريال | +25 |
+| أدوية/صيدليات (أي سياق) | 0 دائمًا — محظور قانونيًا |
 
 الأولوية: HIGH ≥70 | MEDIUM 40-69 | LOW <40
 """.strip()

@@ -115,6 +115,14 @@ async def lifespan(app: FastAPI):
     log = logger.bind(component="lifespan")
     log.info("Initializing Smartfield Lead Agent system")
 
+    if not settings.ADMIN_API_KEY:
+        log.warning(
+            "SECURITY: ADMIN_API_KEY is not set — admin endpoints "
+            "(lead delete, field updates, manual backup trigger) are open "
+            "to anyone who can reach this server. Set ADMIN_API_KEY in .env "
+            "before exposing this server publicly.",
+        )
+
     # Initialize persistent memory DB
     init_db()
 
@@ -309,10 +317,16 @@ def require_admin_key(
     settings: Settings = Depends(get_settings_dep),
 ) -> None:
     """Dependency that enforces admin API key on destructive/sensitive endpoints.
-    If ADMIN_API_KEY is not configured, the check is skipped (dev mode).
+    If ADMIN_API_KEY is not configured, the check is skipped (dev mode) but
+    every pass-through is logged loudly so an unconfigured production
+    deployment can't go unnoticed.
     """
     configured_key = settings.ADMIN_API_KEY
     if not configured_key:
+        logger.warning(
+            "admin_endpoint_unauthenticated",
+            reason="ADMIN_API_KEY not configured — request allowed without auth",
+        )
         return  # dev mode — no key configured, allow all
     if x_api_key != configured_key:
         raise HTTPException(
@@ -515,10 +529,30 @@ async def update_lead_fields(lead_id: str, body: dict, _: None = Depends(require
             raise HTTPException(status_code=503, detail="Supabase not configured")
         from supabase import create_client
         from datetime import datetime as _dt
+        from crm.supabase_crm import SupabaseCRM
         sb = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-        body["updated_at"] = _dt.utcnow().isoformat()
-        sb.table("leads").update(body).eq("id", lead_id).execute()
-        return {"success": True, "lead_id": lead_id, "updated": list(body.keys())}
+
+        # deal_stage carries its own audit trail (deal_stage_history +
+        # lead_events 'stage_changed', see crm.update_deal_stage) — route it
+        # through there instead of the raw update below, which used to let
+        # an admin edit change the pipeline stage with zero audit trail.
+        new_stage = body.pop("deal_stage", None)
+        if new_stage and _pipeline and isinstance(_pipeline.primary_crm, SupabaseCRM):
+            await _pipeline.primary_crm.update_deal_stage(
+                lead_id=lead_id,
+                new_stage=new_stage,
+                changed_by="admin_dashboard",
+                notes=body.get("notes", ""),
+            )
+        elif new_stage:
+            body["deal_stage"] = new_stage  # no audited path available — fall back to raw update
+
+        if body:
+            body["updated_at"] = _dt.utcnow().isoformat()
+            sb.table("leads").update(body).eq("id", lead_id).execute()
+
+        updated_fields = list(body.keys()) + (["deal_stage"] if new_stage and "deal_stage" not in body else [])
+        return {"success": True, "lead_id": lead_id, "updated": updated_fields}
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
@@ -718,7 +752,7 @@ class FollowUpRequest(BaseModel):
 class CPQRequest(BaseModel):
     route_from: str = Field(..., description="Origin city")
     route_to: str = Field(..., description="Destination city")
-    vehicle_type: str = Field(default="medium_truck", description="small_van/medium_truck/large_truck/reefer_trailer")
+    vehicle_type: str = Field(default="small_van", description="small_van/medium_truck/large_truck/reefer_trailer (only small_van has real cost data)")
     temperature_zone: str = Field(default="chilled", description="chilled/frozen/pharma")
     frequency_per_month: int = Field(default=1, ge=1, description="Trips per month")
     urgency: str = Field(default="normal", description="normal/express/urgent")
@@ -1224,6 +1258,7 @@ async def _handle_whatsapp_conversation(
                             pass
                 logger.info("wa.price_auto_replied", phone=phone)
                 await _auto_track_stage(phone=phone, message=text, role="lead")
+                await _auto_track_stage(phone=phone, message=PRICE_AUTO_REPLY, role="agent")
                 return
 
             # buying_signal / complaint — ack + notify + lock thread
@@ -1242,6 +1277,9 @@ async def _handle_whatsapp_conversation(
             _escalated_threads[phone] = _t.time() + _THREAD_LOCK_TTL_S
             logger.info("wa.thread_escalated", phone=phone, type=escalation_type)
             await _auto_track_stage(phone=phone, message=text, role="lead")
+            await _auto_track_stage(
+                phone=phone, message="شكراً — سيتواصل معك فريقنا خلال دقائق", role="agent"
+            )
             return
 
         # ── 3. Normal auto-reply ────────────────────────────────────────────────
@@ -1288,7 +1326,7 @@ async def list_escalated_threads() -> dict:
 
 
 async def _auto_track_stage(phone: str, message: str, role: str) -> None:
-    """Lookup lead by phone and auto-advance deal_stage based on message content."""
+    """Lookup lead by phone, log the message, and auto-advance deal_stage."""
     if not _pipeline:
         return
     try:
@@ -1300,6 +1338,29 @@ async def _auto_track_stage(phone: str, message: str, role: str) -> None:
         lead = await crm.search_lead(phone=phone)
         if not lead:
             return
+
+        # conversations was always written to via log_conversation(), but
+        # nothing ever called it — the table stayed empty despite the agent
+        # actively messaging customers, with zero chat history to review or
+        # feed into the learning loop. This is the one place every inbound
+        # and outbound WhatsApp message already passes through.
+        try:
+            await crm.log_conversation(
+                lead.id, message, "user" if role == "lead" else "ai"
+            )
+        except Exception as exc:
+            logger.debug("log_conversation skipped", error=str(exc))
+
+        # lead_events previously only ever captured 'created'/'task_created' —
+        # nothing about what happens to a lead afterward. This is the same
+        # choke point log_conversation uses above, so it's free to piggyback
+        # phone→lead_id resolution here rather than re-deriving it elsewhere.
+        try:
+            event_type = "message_sent" if role == "agent" else "reply_received"
+            await crm._log_event(lead.id, event_type, {"channel": "whatsapp"})
+        except Exception as exc:
+            logger.debug("lead_events skipped", error=str(exc))
+
         current_stage = str(getattr(lead, "deal_stage", None) or lead.__dict__.get("deal_stage", "NEW_LEAD"))
         lead_score = int(lead.score or 0)
         await track_stage_on_message(

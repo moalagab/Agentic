@@ -61,17 +61,19 @@ class LeadCategory(str, Enum):
     INDUSTRIAL_COLD  = "industrial_cold"
     RETAIL_CHAIN     = "retail_chain"
     LOGISTICS_COMPANY = "logistics_company"
+    MEAL_RUN         = "meal_run"          # اشتراكات وجبات صحية — عقد B2B بخط توزيع ثابت (أُضيف 2026-08-04)
     INDIVIDUAL       = "individual"
     OTHER            = "other"
 
 
 class ICPSegment(str, Enum):
     """Ideal Customer Profile segments — شرائح العميل المثالي."""
-    PREMIUM_FB      = "premium_fb"        # شوكولاتة، بن، مطابخ سحابية
-    PHARMA_BEAUTY   = "pharma_beauty"     # أدوية، مستحضرات تجميل
-    FRESH_FOOD      = "fresh_food"        # وجبات، لحوم، خضار عضوية
-    HORECA          = "horeca"            # فنادق، مطاعم، مقاهي
-    NOT_ICP         = "not_icp"          # خارج الـ ICP
+    PREMIUM_FB        = "premium_fb"          # شوكولاتة، بن، مطابخ سحابية
+    PHARMA_BEAUTY     = "pharma_beauty"       # أدوية، مستحضرات تجميل — محظور قانونيًا (لا ترخيص ناقل SFDA)، غير مُسجَّل ضمن scores
+    FRESH_FOOD        = "fresh_food"          # وجبات، لحوم، خضار عضوية
+    HORECA            = "horeca"              # فنادق، مطاعم، مقاهي
+    MEAL_SUBSCRIPTION = "meal_subscription"   # شركات اشتراك وجبات/دايت — عقد B2B، خط توزيع (أُضيف 2026-08-09)
+    NOT_ICP           = "not_icp"             # خارج الـ ICP
 
 
 class BuyingSignal(str, Enum):
@@ -82,6 +84,7 @@ class BuyingSignal(str, Enum):
     PREMIUM_KEYWORDS    = "premium_keywords"     # كلمات فاخرة في الاسم
     PHARMA_KEYWORDS     = "pharma_keywords"      # كلمات طبية/صيدلانية
     FOOD_KEYWORDS       = "food_keywords"        # كلمات غذائية
+    MEAL_SUBSCRIPTION_KEYWORDS = "meal_subscription_keywords"  # كلمات اشتراك وجبات/دايت
     ACTIVE_ONLINE       = "active_online"        # نشط على الإنترنت
     HIGH_REVIEW_COUNT   = "high_review_count"    # عدد تقييمات عالٍ
 

@@ -196,6 +196,7 @@ class LeadPipeline:
             try:
                 await self.notifier.notify_new_lead(processed.lead, processed)
                 processed = processed.model_copy(update={"notification_sent": True})
+                await self._log_lead_notification(processed.lead)
             except Exception as exc:
                 log.warning("Manual notification failed", error=str(exc))
 
@@ -219,6 +220,34 @@ class LeadPipeline:
             log.info("Dual-write to fallback CRM successful", crm_id=crm_id)
         except Exception as exc:
             log.warning("Dual-write to fallback CRM failed", error=str(exc))
+
+    async def _log_lead_notification(self, lead: Lead) -> None:
+        """
+        Record the new-lead sales alert in notifications_log. The table has
+        existed since the schema was first written but stayed at 0 rows —
+        every Telegram/WhatsApp alert the system sent bypassed logging.
+        """
+        if not lead.id:
+            return
+        try:
+            from crm.supabase_crm import SupabaseCRM
+            from notifications.telegram import TelegramNotifier
+            if not isinstance(self.primary_crm, SupabaseCRM):
+                return
+            channel = "telegram" if isinstance(self.notifier, TelegramNotifier) else "whatsapp"
+            recipients = (
+                self.config.TELEGRAM_OWNER_CHAT_IDS if channel == "telegram"
+                else self.config.SALES_TEAM_WHATSAPP
+            )
+            await self.primary_crm.log_notification(
+                lead_id=lead.id,
+                channel=channel,
+                recipient=",".join(recipients) if recipients else "",
+                status="sent",
+                payload={"type": "new_lead", "score": lead.score},
+            )
+        except Exception as exc:
+            self._log.debug("log_notification skipped", error=str(exc))
 
     async def _check_duplicate(self, lead_create: LeadCreate) -> Lead | None:
         """Search primary CRM for an existing lead."""

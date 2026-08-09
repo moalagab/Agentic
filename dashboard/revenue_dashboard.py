@@ -320,12 +320,13 @@ def render_dashboard_html(data: dict) -> str:
                  "linkedin": "LinkedIn", "manual": "يدوي", "google_forms": "نموذج",
                  "telegram": "Telegram", "serpapi_prospecting": "خرائط جوجل"}
     ICP_AR = {
-        "premium_fb":    "Premium F&B 🍫",
-        "pharma_beauty": "Pharma & Beauty 💊",
-        "fresh_food":    "Fresh Food 🥩",
-        "horeca":        "HoReCa 🏨",
-        "not_icp":       "خارج ICP",
-        "—":             "غير محدد",
+        "premium_fb":        "Premium F&B 🍫",
+        "pharma_beauty":     "Pharma & Beauty 💊 (محظور قانونيًا)",
+        "fresh_food":        "Fresh Food 🥩",
+        "horeca":            "HoReCa 🏨",
+        "meal_subscription": "Meal Run 🍱",
+        "not_icp":           "خارج ICP",
+        "—":                 "غير محدد",
     }
 
     # ── Pipeline Funnel ────────────────────────────────────────────────────────
@@ -367,6 +368,7 @@ def render_dashboard_html(data: dict) -> str:
     ICP_COLORS = {
         "premium_fb": "#8b5cf6", "pharma_beauty": "#3b82f6",
         "fresh_food": "#22c55e", "horeca": "#f59e0b",
+        "meal_subscription": "#ec4899",
         "not_icp": "#94a3b8", "—": "#e2e8f0",
     }
     for seg, cnt in sorted(by_icp.items(), key=lambda x: -x[1]):

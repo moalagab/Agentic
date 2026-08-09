@@ -121,6 +121,21 @@ class SupabaseCRM(BaseCRM):
             lead = Lead(**lead.model_dump())
         log = self._log.bind(lead_id=lead.id, lead_name=lead.name)
 
+        # Dedup guard: leads.phone has a UNIQUE constraint (added 2026-08-09,
+        # after finding 1,931 duplicate rows — serpapi_prospecting had been
+        # re-inserting the same ~330 real phone numbers up to 15x each,
+        # which also caused some contacts to receive duplicate outreach
+        # messages). Check first so a re-scrape returns the existing lead's
+        # id instead of hitting a constraint violation on every insert.
+        if lead.phone:
+            existing = await self.search_lead(phone=lead.phone)
+            if existing:
+                log.debug(
+                    "create_lead: phone already exists, skipping duplicate insert",
+                    existing_id=existing.id,
+                )
+                return existing.id
+
         row = _lead_to_row(lead)
 
         try:
@@ -322,11 +337,23 @@ class SupabaseCRM(BaseCRM):
             )
             from_stage = cur.data.get("deal_stage", "lead") if cur.data else "lead"
 
+            # deal_stage is the source of truth for pipeline position (it has
+            # a full audit trail via deal_stage_history; status never did).
+            # status is kept as a coarser mirror so old code/dashboards that
+            # still read it stay consistent — this is the one place both are
+            # written together (92 of 329 leads had disagreed before this).
+            status_for_stage = {
+                "NEW_LEAD": "new",
+                "WON": "won",
+                "LOST": "lost",
+            }.get(new_stage, "contacted")
+
             # Update leads table
             await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: self.client.table("leads").update({
                     "deal_stage": new_stage,
+                    "status": status_for_stage,
                     "deal_stage_updated_at": now,
                     "updated_at": now,
                 }).eq("id", lead_id).execute()
@@ -344,6 +371,16 @@ class SupabaseCRM(BaseCRM):
                     "changed_at": now,
                 }).execute()
             )
+
+            # lead_events previously only ever captured 'created'/'task_created'
+            # (2,260 of 2,268 rows were 'created') — stage transitions were
+            # invisible to the audit-log/timeline view even though
+            # deal_stage_history recorded them separately.
+            await self._log_event(lead_id, "stage_changed", {
+                "from_stage": from_stage,
+                "to_stage": new_stage,
+                "changed_by": changed_by,
+            })
 
             self._log.info("Deal stage updated", lead_id=lead_id, from_stage=from_stage, to_stage=new_stage)
             return True

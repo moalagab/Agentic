@@ -114,7 +114,10 @@ def signal_score(signals: list[str]) -> int:
         BuyingSignal.MULTIPLE_BRANCHES.value: 10,
         BuyingSignal.RECENTLY_OPENED.value:   15,
         BuyingSignal.PREMIUM_KEYWORDS.value:  10,
-        BuyingSignal.PHARMA_KEYWORDS.value:   10,
+        # Pharma excluded as an ICP segment 2026-08-09 — the signal itself is
+        # still detected (useful for auto-decline/redirect), but contributes
+        # no score so pharma leads don't get prioritized ahead of real ICP fits.
+        BuyingSignal.PHARMA_KEYWORDS.value:   0,
         BuyingSignal.FOOD_KEYWORDS.value:     8,
         "high_purchase_intent":               20,
         "switching_intent":                   15,

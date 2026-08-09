@@ -15,6 +15,13 @@ ExecStart=/home/smartfield/app/.venv/bin/uvicorn channels.webhook_server:app \
     --log-level info
 Restart=always
 RestartSec=5
+# systemd's default crash-loop protection (5 restarts / 10s) will permanently
+# give up and leave the service dead if it crashes repeatedly in a short
+# window — silently, with no alert. StartLimitIntervalSec=0 disables that
+# giveup so Restart=always truly means always. This does not fix whatever
+# caused a crash loop, but it stops "systemd gave up" from being an
+# additional, invisible failure mode on top of the real one.
+StartLimitIntervalSec=0
 StandardOutput=append:/home/smartfield/app/logs/app.log
 StandardError=append:/home/smartfield/app/logs/app.log
 Environment=PYTHONUNBUFFERED=1

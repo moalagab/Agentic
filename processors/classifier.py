@@ -31,6 +31,23 @@ PHARMA_KEYWORDS = {
     "مستلزمات طبية", "تجهيزات طبية",
 }
 
+# Meal Run — healthy restaurants and meal/diet-subscription service
+# providers, officially approved 2026-08-04 as a B2B segment. Customer type
+# is any such business with more than one subscriber of its own (restaurant
+# OR dedicated subscription brand — not narrower than that). More specific
+# than FOOD_KEYWORDS on purpose so a genuine healthy-restaurant/diet brand is
+# categorized MEAL_RUN instead of generic FOOD_TRANSPORT. Contract stays
+# with that business only — see LeadCategory.MEAL_RUN.
+MEAL_SUBSCRIPTION_KEYWORDS = {
+    "دايت", "diet", "اشتراك وجبات", "meal subscription", "meal plan",
+    "خطة غذائية", "خطة أكل", "سعرات", "calorie", "كيتو", "keto",
+    "لوكارب", "low carb", "فيت فود", "fit food", "fitness meals",
+    "healthy meals", "وجبات صحية", "meal delivery", "توصيل وجبات",
+    "نظام غذائي", "تخسيس", "weight loss meals", "clean eating",
+    "مطعم صحي", "healthy restaurant", "مطعم دايت", "diet restaurant",
+    "مشتركين", "subscribers", "اشتراكات", "subscriptions",
+}
+
 INDUSTRIAL_KEYWORDS = {
     "كيماويات", "كيمياء", "بتروكيماويات", "صناعي", "مصنع", "chemical",
     "industrial", "petrochemical", "factory", "manufacturing",
@@ -71,7 +88,7 @@ class LeadClassifier:
         Scoring breakdown:
         - Has company name:          +10 points
         - Has email:                 +10 points
-        - Cargo type is food/pharma: +20 points
+        - Cargo type is food:        +20 points (pharma excluded 2026-08-09 — not an active ICP segment)
         - Fleet size > 5:            +15 points
         - Has budget:                +20 points
         - Route is domestic Saudi:   +10 points
@@ -94,10 +111,23 @@ class LeadClassifier:
             reasons.append("لديه بريد إلكتروني (+10)")
 
         # ── Cargo type analysis ───────────────────────────────────────────────
+        # PHARMA_TRANSPORT is still detected as a category (useful for
+        # routing/decline messaging) but no longer scores as a priority
+        # cargo type — pharma is not an active ICP segment (excluded
+        # 2026-08-09, see processors/icp_engine.py).
         category = self._detect_category(all_text, lead_create.cargo_type)
-        if category in (LeadCategory.FOOD_TRANSPORT, LeadCategory.PHARMA_TRANSPORT):
+        if category == LeadCategory.MEAL_RUN:
+            # Officially approved 2026-08-04 B2B segment — most inbound
+            # requests are this type currently. Scored like FOOD_TRANSPORT;
+            # quoting still has to go through the route-based Meal Run
+            # pricing, never the per-trip Van rate (see agent/prompts.py).
+            score += 20
+            reasons.append(f"Meal Run — قطاع معتمد رسميًا: {category} (+20)")
+        elif category == LeadCategory.FOOD_TRANSPORT:
             score += 20
             reasons.append(f"نوع بضاعة ذو أولوية عالية: {category} (+20)")
+        elif category == LeadCategory.PHARMA_TRANSPORT:
+            reasons.append(f"نوع بضاعة: {category} (قطاع غير مستهدف حاليًا، +0)")
         elif category == LeadCategory.INDUSTRIAL_COLD:
             score += 15
             reasons.append(f"نوع بضاعة صناعي: {category} (+15)")
@@ -200,9 +230,16 @@ class LeadClassifier:
         if cargo_type:
             search_text = f"{cargo_type.lower()} {search_text}"
 
-        # Check keywords in priority order
+        # Check keywords in priority order. PHARMA stays first regardless of
+        # any other match — the legal exclusion (no SFDA carrier license)
+        # takes precedence over a missed categorization. MEAL_SUBSCRIPTION
+        # is checked before the generic FOOD_KEYWORDS so a genuine
+        # diet/subscription brand doesn't fall into plain food_transport.
         if any(kw.lower() in search_text for kw in PHARMA_KEYWORDS):
             return LeadCategory.PHARMA_TRANSPORT
+
+        if any(kw.lower() in search_text for kw in MEAL_SUBSCRIPTION_KEYWORDS):
+            return LeadCategory.MEAL_RUN
 
         if any(kw.lower() in search_text for kw in FOOD_KEYWORDS):
             return LeadCategory.FOOD_TRANSPORT
@@ -239,7 +276,7 @@ class LeadClassifier:
             "scoring_breakdown": {
                 "company_name": 10,
                 "has_email": 10,
-                "cargo_type_food_pharma": 20,
+                "cargo_type_food": 20,
                 "fleet_size_gt5": 15,
                 "budget": 20,
                 "saudi_route": 10,

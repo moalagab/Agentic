@@ -517,10 +517,39 @@ class SmartfieldLeadAgent:
                 next_actions=[tool_input.get("next_action", "Follow up with lead")],
             )
             await self.notifier.notify_new_lead(lead=lead, processed=temp_processed)
+            await self._log_notification_sent(lead)
             return {"success": True, "recipients": len(self.config.SALES_TEAM_WHATSAPP)}
         except Exception as exc:
             self._log.error("WhatsApp notification failed", error=str(exc))
             return {"success": False, "error": str(exc)}
+
+    async def _log_notification_sent(self, lead: Lead) -> None:
+        """
+        Record the new-lead sales alert in notifications_log. This table
+        existed since the schema was first written but stayed at 0 rows —
+        every Telegram/WhatsApp alert the agent sent bypassed logging.
+        """
+        if not lead.id:
+            return
+        try:
+            from crm.supabase_crm import SupabaseCRM
+            from notifications.telegram import TelegramNotifier
+            if not isinstance(self.crm_client, SupabaseCRM):
+                return
+            channel = "telegram" if isinstance(self.notifier, TelegramNotifier) else "whatsapp"
+            recipients = (
+                self.config.TELEGRAM_OWNER_CHAT_IDS if channel == "telegram"
+                else self.config.SALES_TEAM_WHATSAPP
+            )
+            await self.crm_client.log_notification(
+                lead_id=lead.id,
+                channel=channel,
+                recipient=",".join(recipients) if recipients else "",
+                status="sent",
+                payload={"type": "new_lead", "score": lead.score},
+            )
+        except Exception as exc:
+            self._log.debug("log_notification skipped", error=str(exc))
 
     async def _tool_create_follow_up_task(
         self,

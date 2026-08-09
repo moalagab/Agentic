@@ -459,19 +459,15 @@ class CreativeFollowupEngine:
         return f"❌ فشل الإرسال — {phone}"
 
     async def _mark_lost(self, lead: dict) -> None:
-        loop = asyncio.get_running_loop()
+        # Routed through update_deal_stage() (not a raw table update) so this
+        # transition gets a deal_stage_history row like every other stage
+        # change, and status stays in sync with deal_stage automatically.
         try:
-            await loop.run_in_executor(
-                None,
-                lambda: self.crm.client.table("leads")
-                    .update({
-                        "deal_stage": "LOST",
-                        "status": "lost",
-                        "notes": "[auto] تم إغلاق الملف بعد 3 محاولات متابعة بدون رد",
-                        "updated_at": datetime.utcnow().isoformat(),
-                    })
-                    .eq("id", lead["id"])
-                    .execute()
+            await self.crm.update_deal_stage(
+                lead["id"],
+                "LOST",
+                changed_by="system",
+                notes="[auto] تم إغلاق الملف بعد 3 محاولات متابعة بدون رد",
             )
         except Exception as exc:
             self._log.warning("followup.mark_lost_failed", error=str(exc))

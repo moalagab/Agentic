@@ -77,17 +77,23 @@ class HybridScorer:
     في الرياض أو مدن رئيسية            │ +10
     أكثر من 5 توصيلات شهرياً          │ +20
     طلب عاجل / Urgent Request          │ +15
-    أدوية / Pharma                     │ +5 bonus
     ─────────────────────────────────────────────────────────
     Budget tier                        │ +30 max
     Fleet size                         │ +25 max
     Contact completeness               │ +10 max
     ─────────────────────────────────────────────────────────
+    Pharma excluded 2026-08-09 — legally prohibited for Smart Field (no SFDA
+    carrier license), not just an unwanted segment (see processors/icp_engine.py).
+    Mentioning pharma keywords no longer elevates a lead's business-type
+    score or priority.
+
+    Meal Run / diet-subscription added 2026-08-09 as "meal_subscription" —
+    officially approved 2026-08-04 B2B segment (see company-profile.md).
     """
 
     # Business type scores
     BUSINESS_SCORES = {
-        "pharma": 25,           # Highest margin
+        "meal_subscription": 23,  # Meal Run — officially approved B2B segment 2026-08-04, most inbound requests are this type
         "food_frozen": 22,      # Frozen food - high demand
         "food_fresh": 20,       # Fresh produce
         "food_general": 18,     # General food
@@ -103,6 +109,13 @@ class HybridScorer:
     }
 
     PHARMA_KW = {"دواء","أدوية","ادوية","صيدلية","مستشفى","طبي","طبية","لقاح","pharma","pharmaceutical","medicine","hospital","medical","drug","vaccine","مستلزمات طبية"}
+    # Meal Run — healthy restaurants and meal/diet-subscription service
+    # providers, officially approved 2026-08-04 B2B segment. Customer type is
+    # any such business with more than one subscriber of its own (restaurant
+    # OR dedicated subscription brand). Checked before FROZEN_KW/FOOD_KW in
+    # _detect_business_type so a genuine healthy-restaurant/diet brand isn't
+    # miscategorized as generic food.
+    MEAL_KW = {"دايت","diet","اشتراك وجبات","meal subscription","meal plan","خطة غذائية","خطة أكل","سعرات","calorie","كيتو","keto","لوكارب","low carb","فيت فود","fit food","fitness meals","healthy meals","وجبات صحية","meal delivery","توصيل وجبات","نظام غذائي","تخسيس","weight loss meals","clean eating","مطعم صحي","healthy restaurant","مطعم دايت","diet restaurant","مشتركين","subscribers","اشتراكات","subscriptions"}
     FROZEN_KW = {"مجمد","مجمده","frozen","ice cream","بوظة","جليد"}
     FOOD_KW   = {"لحم","لحوم","دجاج","اسماك","سمك","خضار","فواكه","الألبان","ألبان","meat","chicken","fish","seafood","dairy","food","مواد غذائية","أغذية","مطعم","مطاعم","restaurant","مخبز","خبز","bakery","catering","تموين"}
     RETAIL_KW = {"هايبر","سوبر ماركت","تجزئة","سلسلة","hypermarket","supermarket","retail","chain"}
@@ -218,7 +231,13 @@ class HybridScorer:
 
     def _detect_business_type(self, text: str, cargo: str | None) -> tuple[str, int]:
         t = f"{cargo or ''} {text}".lower()
-        if any(k in t for k in self.PHARMA_KW):     return "pharma", 25
+        # Pharma excluded 2026-08-09 — no priority branch for PHARMA_KW here.
+        # PHARMA_KW is still used below in _needs_refrigeration() (pharma
+        # products genuinely need cold chain — that's a physical fact, not
+        # segment targeting), just not as a business-type score booster.
+        # MEAL_KW checked first — most specific, and most inbound requests
+        # are this type as of 2026-08-09.
+        if any(k in t for k in self.MEAL_KW):        return "meal_subscription", 23
         if any(k in t for k in self.FROZEN_KW):      return "food_frozen", 22
         if any(k in t for k in self.CLOUD_KW):       return "cloud_kitchen", 15
         if any(k in t for k in self.SPECIALTY_KW):   return "specialty", 10
@@ -232,7 +251,12 @@ class HybridScorer:
     def _needs_refrigeration(self, text: str, cargo: str | None) -> bool:
         ref_kw = {"مبرد","تبريد","مجمد","بارد","refrigerat","cold chain","chilled","frozen","temperature"}
         t = f"{cargo or ''} {text}".lower()
-        return any(k in t for k in ref_kw) or any(k in t for k in self.PHARMA_KW) or any(k in t for k in self.FROZEN_KW)
+        return (
+            any(k in t for k in ref_kw)
+            or any(k in t for k in self.PHARMA_KW)
+            or any(k in t for k in self.FROZEN_KW)
+            or any(k in t for k in self.MEAL_KW)
+        )
 
     def _in_main_city(self, lead: LeadCreate) -> bool:
         route_text = " ".join(filter(None, [lead.route_from, lead.route_to, lead.company])).lower()
@@ -260,7 +284,15 @@ class HybridScorer:
     def _estimate_values(self, lead: LeadCreate, btype: str, score: int) -> tuple[float, int]:
         """Estimate monthly revenue and trip count based on lead data."""
         base_rates = {
-            "pharma": 8000, "food_frozen": 6000, "food_fresh": 5000,
+            # Meal Run: ~5,500 SAR/month is a conservative default for an
+            # UNQUALIFIED lead — real Meal Run route pricing is 180-250
+            # SAR/day for a small route (<=15 stops, 1-2 neighborhoods) up to
+            # 340-400 SAR/day for a 16-30 stop / 3+ neighborhood route
+            # (company-profile.md). Subscriber count and geographic
+            # clustering decide the real number per deal — ask directly,
+            # don't trust this estimate for an actual quote.
+            "meal_subscription": 5500,
+            "food_frozen": 6000, "food_fresh": 5000,
             "food_general": 4500, "retail_chain": 7000, "cloud_kitchen": 3500,
             "catering": 3000, "food_supplier": 4000, "industrial": 5500,
             "logistics": 4000, "specialty": 3500, "online_food": 2500, "other": 3000,
@@ -273,7 +305,7 @@ class HybridScorer:
 
     def _btype_to_category(self, btype: str) -> str:
         mapping = {
-            "pharma": "pharma_transport",
+            "meal_subscription": "meal_run",  # kept distinct from food_transport — see LeadCategory.MEAL_RUN
             "food_frozen": "food_transport", "food_fresh": "food_transport",
             "food_general": "food_transport", "cloud_kitchen": "food_transport",
             "catering": "food_transport", "food_supplier": "food_transport",

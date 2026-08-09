@@ -301,16 +301,27 @@ class WhatsAppChannelHandler:
                 body = msg.get("body", "").strip()
                 if not body or msg.get("type") not in ("chat", "text", None):
                     return None
-                raw_from = msg.get("from", "")  # e.g. "966501234567@c.us" or "xxx@lid"
+                raw_from = msg.get("from", "")  # e.g. "966501234567@c.us" or "193406689145071@lid"
                 # Ignore group chats — @g.us suffix = WhatsApp group
                 if "@g.us" in raw_from:
                     self._log.debug("wa.group_message_ignored", chat=raw_from[:30])
                     return None
                 # Keep raw_from as chatId for reply — strip @suffix for display phone
                 chat_id = raw_from
-                phone = raw_from.split("@")[0]
-                if not phone.startswith("+"):
-                    phone = f"+{phone}"
+                if raw_from.endswith("@lid"):
+                    # @lid is WhatsApp's privacy-preserving linked ID, not a real
+                    # phone number — the digits before "@lid" are an opaque internal
+                    # ID (often 15+ digits), not E.164. Stripping the suffix and
+                    # prepending "+" (old behavior) fabricated a fake phone number
+                    # that looked valid but silently broke every follow-up send.
+                    # Keep the full chatId instead — _normalize_chat_id() already
+                    # passes any "@"-suffixed value straight through to WAHA.
+                    phone = raw_from
+                    self._log.warning("wa.lid_contact_no_real_phone", chat_id=raw_from[:30])
+                else:
+                    phone = raw_from.split("@")[0]
+                    if not phone.startswith("+"):
+                        phone = f"+{phone}"
                 name = msg.get("notifyName") or msg.get("pushName") or "WhatsApp Contact"
                 return {"phone": phone, "text": body, "name": name, "waha_chat_id": chat_id}
 

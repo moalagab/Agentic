@@ -1,6 +1,8 @@
 """
 ICP Engine — Ideal Customer Profile Scoring
 يصنف كل عميل على 4 شرائح ICP ويعطيه نقاط 0-100
+(pharma_beauty استُبعد نهائيًا 2026-08-09 — محظور قانونيًا، لا ترخيص ناقل
+SFDA؛ meal_subscription أُضيف 2026-08-09 — قطاع Meal Run المعتمد رسميًا)
 """
 
 from __future__ import annotations
@@ -36,6 +38,25 @@ _FRESH_FOOD_KEYWORDS = [
     "produce", "dairy", "ألبان",
 ]
 
+# Meal subscription / healthy-meal businesses — added 2026-08-04 as an
+# officially approved B2B segment (Meal Run service). Customer type is
+# BROADER than "subscription company": healthy restaurants (مطاعم صحية) and
+# any healthy-meal/diet service provider, as long as they have more than one
+# subscriber of their own — the contract and billing stay with that business
+# only, subscriber homes are just route stops within that one contract,
+# never a direct consumer contract. More specific than _FRESH_FOOD_KEYWORDS
+# on purpose so a genuine healthy-restaurant/diet brand scores here instead
+# of the generic fresh-food or HoReCa bucket.
+_MEAL_SUBSCRIPTION_KEYWORDS = [
+    "دايت", "diet", "اشتراك وجبات", "meal subscription", "meal plan",
+    "خطة غذائية", "خطة أكل", "سعرات", "calorie", "كيتو", "keto",
+    "لوكارب", "low carb", "فيت فود", "fit food", "fitness meals",
+    "healthy meals", "وجبات صحية", "meal delivery", "توصيل وجبات",
+    "نظام غذائي", "تخسيس", "weight loss meals", "clean eating",
+    "مطعم صحي", "healthy restaurant", "مطعم دايت", "diet restaurant",
+    "مشتركين", "subscribers", "اشتراكات", "subscriptions",
+]
+
 _HORECA_KEYWORDS = [
     "فندق", "hotel", "مطعم", "restaurant", "مقهى", "café",
     "catering supplier", "distributor", "موزع", "supplier", "مورد",
@@ -65,15 +86,6 @@ def _score_premium_fb(text: str, rating: float, review_count: int) -> int:
     return min(score, 100)
 
 
-def _score_pharma_beauty(text: str, category: str) -> int:
-    score = 0
-    hits = _text_hits(text, _PHARMA_BEAUTY_KEYWORDS)
-    score += min(hits * 20, 60)
-    if "pharma" in category.lower():
-        score += 30
-    return min(score, 100)
-
-
 def _score_fresh_food(text: str, rating: float) -> int:
     score = 0
     hits = _text_hits(text, _FRESH_FOOD_KEYWORDS)
@@ -91,6 +103,33 @@ def _score_horeca(text: str, review_count: int) -> int:
         score += 20
     elif review_count >= 20:
         score += 10
+    return min(score, 100)
+
+
+def _score_meal_subscription(text: str, rating: float, review_count: int) -> int:
+    """
+    Meal Run — healthy restaurants and meal/diet-subscription service
+    providers, officially approved 2026-08-04 as a B2B segment. Customer
+    type is any such BUSINESS with more than one subscriber of its own
+    (restaurant or dedicated subscription brand — not narrower than that);
+    the contract and billing stay with that business, subscriber homes are
+    only stops on its route, never a direct consumer contract (see
+    company-profile.md in the vault). review_count/rating stand in for an
+    established subscriber base — subscriber count and geographic clustering
+    are what actually decide whether a specific deal is viable, and that
+    still has to be asked directly; this score is a first-pass filter, not a
+    substitute for it.
+    """
+    score = 0
+    hits = _text_hits(text, _MEAL_SUBSCRIPTION_KEYWORDS)
+    score += min(hits * 20, 60)
+    if review_count >= 200:
+        score += 20
+    elif review_count >= 50:
+        score += 10
+    if rating >= 4.0:
+        score += 10
+    score += 10  # base: officially approved B2B segment
     return min(score, 100)
 
 
@@ -121,6 +160,8 @@ def detect_buying_signals(lead: Lead) -> list[str]:
         signals.append(BuyingSignal.PHARMA_KEYWORDS.value)
     if _text_hits(name, _FRESH_FOOD_KEYWORDS) >= 1:
         signals.append(BuyingSignal.FOOD_KEYWORDS.value)
+    if _text_hits(name, _MEAL_SUBSCRIPTION_KEYWORDS) >= 1:
+        signals.append(BuyingSignal.MEAL_SUBSCRIPTION_KEYWORDS.value)
 
     # Recently opened — if raw_data has opened_recently flag
     if raw.get("recently_opened") or raw.get("opened_recently"):
@@ -148,11 +189,15 @@ def score_lead_icp(lead: Lead) -> tuple[int, str]:
         category,
     ])
 
-    # pharma_beauty removed — not an active ICP segment for Smart Field
+    # pharma_beauty is not an active ICP segment for Smart Field (confirmed
+    # 2026-08-09) — excluded from scoring entirely: not just deprioritized,
+    # legally prohibited (no SFDA carrier license). meal_subscription added
+    # 2026-08-09 as the officially approved Meal Run segment.
     scores = {
-        ICPSegment.PREMIUM_FB: _score_premium_fb(search_text, rating, review_count),
-        ICPSegment.FRESH_FOOD: _score_fresh_food(search_text, rating),
-        ICPSegment.HORECA:     _score_horeca(search_text, review_count),
+        ICPSegment.PREMIUM_FB:        _score_premium_fb(search_text, rating, review_count),
+        ICPSegment.FRESH_FOOD:        _score_fresh_food(search_text, rating),
+        ICPSegment.HORECA:            _score_horeca(search_text, review_count),
+        ICPSegment.MEAL_SUBSCRIPTION: _score_meal_subscription(search_text, rating, review_count),
     }
 
     best_segment = max(scores, key=lambda s: scores[s])
