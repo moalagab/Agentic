@@ -1246,6 +1246,15 @@ async def _handle_whatsapp_conversation(
                 name=name, phone=phone, last_message=text,
             )
 
+            # A price/buying-signal/complaint message is the highest-intent
+            # contact this system sees — it used to notify the owner and
+            # reply, but never register the lead in CRM, so it stayed
+            # invisible to the pipeline/dashboard/lead_events unless the
+            # person also happened to trigger the separate AI-conversation
+            # registration flow later. create_lead() dedupes by phone, so
+            # this is a no-op if a lead already exists for this number.
+            await _ensure_lead_for_escalation(phone, name, text, escalation_type)
+
             if escalation_type == "price_inquiry":
                 # Auto-reply with price template, notify owner — NO thread lock
                 if _wa_notifier:
@@ -1294,6 +1303,24 @@ async def _handle_whatsapp_conversation(
 
     except Exception as exc:
         logger.error("employee.conversation_failed", phone=phone, error=str(exc))
+
+
+async def _ensure_lead_for_escalation(
+    phone: str, name: str, text: str, escalation_type: str
+) -> None:
+    """Register a minimal CRM lead for a price/buying-signal/complaint contact."""
+    if not _pipeline or not phone:
+        return
+    try:
+        lead = LeadCreate(
+            name=name or "عميل واتساب",
+            phone=phone,
+            source=LeadSource.WHATSAPP,
+            notes=f"[{escalation_type}] {text[:300]}",
+        )
+        await _pipeline.primary_crm.create_lead(lead)
+    except Exception as exc:
+        logger.debug("ensure_lead_for_escalation skipped", phone=phone, error=str(exc))
 
 
 @app.post("/api/lead/unlock-thread", tags=["Leads"])
