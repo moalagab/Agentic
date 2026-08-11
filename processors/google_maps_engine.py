@@ -78,7 +78,7 @@ SYSTEM_PROMPT = """أنت مساعد مبيعات متخصص لشركة Smart Fi
 # SerpAPI — جلب الأماكن
 # ===============================
 
-async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> list[dict]:
+async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> Optional[list[dict]]:
     """
     يجيب أماكن حقيقية من Google Maps عبر Outscraper.
 
@@ -86,6 +86,10 @@ async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> 
     - api_key يُرسل كـ base64 كما هو (بدون decode)
     - URL: api.outscraper.cloud (وليس api.app.outscraper.com)
     - async=false لاستقبال النتائج فوراً
+
+    Returns None on a request/API failure (so the caller can tell "the API
+    errored" apart from "the API succeeded but found nothing") — [] means a
+    real, successful empty result.
     """
     params = {
         "query":       query,
@@ -106,7 +110,7 @@ async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> 
 
             if response.status_code != 200:
                 logger.warning(f"Outscraper {response.status_code} [{query}]: {response.text[:200]}")
-                return []
+                return None
 
             data = response.json()
             # النتائج في data["data"] كـ list of lists
@@ -120,7 +124,7 @@ async def fetch_places_outscraper(query: str, api_key: str, limit: int = 20) -> 
 
         except Exception as e:
             logger.error(f"Outscraper fetch error [{query}]: {e}")
-            return []
+            return None
 
 
 def normalize_place(raw: dict) -> dict:
@@ -319,18 +323,25 @@ async def run_prospecting_engine(
 ) -> list[dict]:
     """
     الدالة الرئيسية — تشغّل من الـ Scheduler كل صباح 8:15.
-    المعامل outscraper_api_key يُستخدم الآن لـ SerpAPI.
+    تستخدم Outscraper فعليًا (Google Maps data) — راجع processors/serpapi_engine.py
+    للمحرك المبني على SerpAPI الحقيقي (Google Search)، غير مفعّل بالجدولة حاليًا.
     """
-    logger.info("🚀 بدء SerpAPI Prospecting Engine")
+    logger.info("🚀 بدء Outscraper Prospecting Engine")
 
     semaphore = asyncio.Semaphore(5)
     seen_phones: set[str] = set()
     valid_places: list[dict] = []
+    failed_queries = 0
 
     # ── الخطوة 1: جمع الأماكن من Outscraper ─────────────────────────────────
     for query in SEARCH_QUERIES:
         logger.info(f"🔍 Outscraper: {query}")
         raw_places = await fetch_places_outscraper(query, outscraper_api_key)
+
+        if raw_places is None:
+            failed_queries += 1
+            await asyncio.sleep(0.5)
+            continue
 
         for raw in raw_places:
             place = normalize_place(raw)
@@ -353,7 +364,21 @@ async def run_prospecting_engine(
 
         await asyncio.sleep(0.5)
 
-    logger.info(f"📍 أماكن جديدة (بعد dedup): {len(valid_places)}")
+    # كل الاستعلامات فشلت (خطأ API/فوترة، لا نتائج فارغة عادية) — كانت تمر
+    # صامتة لـ47 يومًا متتالية (24 يونيو–9 أغسطس 2026) لأن الكود القديم ما
+    # يفرّق بين "فشل الطلب" و"نجح الطلب بدون نتائج". هذا التنبيه يقطع الصمت.
+    if failed_queries == len(SEARCH_QUERIES) and notify_callback:
+        try:
+            await notify_callback(
+                "🔴 *فشل التنقيب اليومي بالكامل*\n"
+                f"كل استعلامات Outscraper الـ{len(SEARCH_QUERIES)} فشلت اليوم — "
+                "على الأرجح مشكلة رصيد/فوترة بحساب Outscraper.com.\n"
+                "راجع `outscraper.com` وتحقق من بيانات الدفع/الرصيد."
+            )
+        except Exception as exc:
+            logger.error(f"Failed to send total-failure alert: {exc}")
+
+    logger.info(f"📍 أماكن جديدة (بعد dedup): {len(valid_places)} | استعلامات فاشلة: {failed_queries}/{len(SEARCH_QUERIES)}")
 
     if not valid_places:
         logger.info("لا توجد أماكن جديدة اليوم")
