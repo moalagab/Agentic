@@ -300,15 +300,18 @@ def get_scoring_context() -> str:
     carrier license), matching processors/icp_engine.py, which excludes
     pharma_beauty from ICP scoring entirely regardless of any other factor.
     Meal Run (meal_subscription) added 2026-08-09 — officially approved B2B
-    segment 2026-08-04; only counts if the contract is with the meal
-    company, never a single individual subscriber.
+    segment 2026-08-04, broadened 2026-08-09: the primary/base definition is
+    a healthy restaurant or meal-service provider (not narrowly "a
+    subscription company") with more than one subscriber of its own; only
+    counts if the contract is with that business, never a single individual
+    subscriber.
     """
     return """
 ## جدول التقييم — Rule-Based Score
 
 | العامل | النقاط |
 |---|---|
-| Meal Run (عقد B2B مع شركة وجبات، خط بمشتركين مُجمَّعين) | 23 |
+| Meal Run (عقد B2B مع مطعم صحي أو مزوّد خدمة وجبات، خط بمشتركين مُجمَّعين) | 23 |
 | مجمدات / لحوم | 22 |
 | أغذية طازجة | 20 |
 | سلاسل تجزئة | 16 |
