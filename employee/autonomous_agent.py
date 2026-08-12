@@ -262,12 +262,23 @@ class AutonomousEmployee:
         crm: "BaseCRM",
         notifier: "WhatsAppNotifier",
         telegram: "TelegramHandler | None" = None,
+        wa_notifier: "WhatsAppNotifier | None" = None,
     ):
         self.config = config
         self.pipeline = pipeline
         self.crm = crm
         self.notifier = notifier
         self.telegram = telegram
+        # `notifier` is the owner-ALERT channel — Telegram when configured
+        # (see create_pipeline_from_config), WhatsApp otherwise. _send_whatsapp()
+        # below sends real WhatsApp messages (to leads for follow-ups, to
+        # owners as a WhatsApp fallback) and must never go through Telegram's
+        # Bot API — it was doing exactly that (passing a phone number as a
+        # Telegram chat_id, which the API always rejects with 400) whenever
+        # Telegram was the active notifier. wa_notifier is the dedicated
+        # WhatsApp channel; falls back to `notifier` only when it's already
+        # a WhatsApp notifier (i.e. Telegram isn't configured).
+        self.wa_notifier = wa_notifier or notifier
         self.cpq = CPQEngine()
         self._owner_phones: set[str] = set(
             p.strip() for p in (config.SALES_TEAM_WHATSAPP or [])
@@ -612,7 +623,7 @@ class AutonomousEmployee:
                     if not telegram_ok and self.config.SALES_TEAM_WHATSAPP:
                         plain = msg.replace("*", "").replace("_", "")
                         for sales_phone in self.config.SALES_TEAM_WHATSAPP:
-                            asyncio.create_task(self.notifier.send_custom_message(sales_phone, plain))
+                            asyncio.create_task(self.wa_notifier.send_custom_message(sales_phone, plain))
                     quote_result = "تم إبلاغ فريقنا بطلبك — سيتواصلون معك قريباً بعرض مفصّل."
                     return {"status": "تم إبلاغ المالك بطلب السعر."}
                 except Exception as exc:
@@ -858,8 +869,10 @@ class AutonomousEmployee:
         return ""
 
     async def _send_whatsapp(self, phone: str, message: str):
-        """Send a WhatsApp message via the notifier's send_custom_message."""
-        await self.notifier.send_custom_message(phone, message)
+        """Send a WhatsApp message — always via wa_notifier, never self.notifier
+        (which is Telegram when Telegram owners are configured; passing a phone
+        number there as a chat_id always fails with a Telegram 400)."""
+        await self.wa_notifier.send_custom_message(phone, message)
 
     async def _send_whatsapp_template(
         self,

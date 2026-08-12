@@ -152,6 +152,7 @@ async def lifespan(app: FastAPI):
         crm=_pipeline.primary_crm,
         notifier=_pipeline.notifier,
         telegram=_tg_handler,
+        wa_notifier=_wa_notifier,
     )
 
     # Initialize follow-up engine and meeting booking manager
