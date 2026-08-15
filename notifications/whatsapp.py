@@ -169,19 +169,29 @@ class WhatsAppNotifier:
     async def send_lead_summary(self, phone: str, lead: Lead) -> bool:
         return await self.send_custom_message(phone, _format_lead_summary(lead))
 
-    async def send_custom_message(self, phone: str | None, message: str) -> bool:
+    async def send_custom_message(
+        self, phone: str | None, message: str, human_delay: bool = False
+    ) -> bool:
+        """
+        human_delay=True adds a randomized typing-simulated pause before
+        sending — use it for cold outreach (first message to a stranger),
+        the highest-risk pattern for WhatsApp's anti-automation detection.
+        Leave it off for replies in an existing conversation (inbound
+        auto-reply, owner alerts) where responsiveness matters more and the
+        ban risk is much lower since there's already a two-way thread.
+        """
         targets = [phone] if phone else self.config.SALES_TEAM_WHATSAPP
         results = await asyncio.gather(
-            *[self._send(t, message) for t in targets if t],
+            *[self._send(t, message, human_delay) for t in targets if t],
             return_exceptions=True,
         )
         return all(r is True for r in results)
 
     # ─── Internal senders ─────────────────────────────────────────────────────
 
-    async def _send(self, phone: str, body: str) -> bool:
+    async def _send(self, phone: str, body: str, human_delay: bool = False) -> bool:
         if self._waha_enabled:
-            return await self._send_waha(phone, body)
+            return await self._send_waha(phone, body, human_delay)
         elif self._twilio_client:
             return bool(await self._send_twilio(phone, body))
         else:
@@ -212,12 +222,15 @@ class WhatsAppNotifier:
             self._log.warning("LID resolution failed", lid=lid, error=str(exc))
         return lid  # fallback to original
 
-    async def _send_waha(self, phone: str, body: str) -> bool:
+    async def _send_waha(self, phone: str, body: str, human_delay: bool = False) -> bool:
         chat_id = _normalize_chat_id(phone)
 
         # Resolve @lid to @c.us — WAHA can't send to @lid format
         if chat_id.endswith("@lid"):
             chat_id = await self._resolve_lid_to_cus(chat_id)
+
+        if human_delay:
+            await self._simulate_typing(chat_id)
 
         payload = {
             "session": self._waha_session,
@@ -237,6 +250,38 @@ class WhatsAppNotifier:
         except Exception as exc:
             self._log.error("WAHA send failed", to=phone, error=str(exc))
             return False
+
+    async def _simulate_typing(self, chat_id: str) -> None:
+        """
+        Cold-outreach-only pacing: mark the chat as seen, show "typing..."
+        for a randomized 30-120s, then stop — instead of firing the message
+        instantly. Purely cosmetic on its own, but it also naturally spaces
+        out a batch of approvals (they used to fire back-to-back within the
+        same second) and avoids the single sharpest bot signature: a cold
+        message landing with zero read/type latency.
+        """
+        import random
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"{self._waha_url}/api/startTyping",
+                    headers=self._waha_headers,
+                    json={"session": self._waha_session, "chatId": chat_id},
+                )
+        except Exception as exc:
+            self._log.debug("WAHA startTyping failed", chat_id=chat_id, error=str(exc))
+
+        await asyncio.sleep(random.uniform(30, 120))
+
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.post(
+                    f"{self._waha_url}/api/stopTyping",
+                    headers=self._waha_headers,
+                    json={"session": self._waha_session, "chatId": chat_id},
+                )
+        except Exception as exc:
+            self._log.debug("WAHA stopTyping failed", chat_id=chat_id, error=str(exc))
 
     async def _send_twilio(self, to_phone: str, body: str) -> str:
         if not to_phone.startswith("whatsapp:"):

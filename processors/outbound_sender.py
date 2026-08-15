@@ -205,7 +205,12 @@ class OutboundSender:
                 "generic",
             )
 
-        sent = await self.notifier.send_custom_message(phone, message)
+        # human_delay=True: this is a cold first-contact message to a stranger
+        # sourced from prospecting — the single riskiest pattern for WhatsApp's
+        # anti-automation detection. Simulated typing + a 30-120s pause also
+        # naturally spaces out a batch of approvals that used to fire within
+        # the same second of each other.
+        sent = await self.notifier.send_custom_message(phone, message, human_delay=True)
         if sent:
             await self._mark_sent(lead_id, message)
             # Record A/B variant
