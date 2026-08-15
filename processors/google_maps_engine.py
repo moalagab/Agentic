@@ -191,21 +191,22 @@ def _parse_gemini_json(text: str) -> dict:
     raise ValueError(f"Could not parse Gemini response as JSON. Preview: {text[:120]!r}")
 
 
-async def _classify_with_gemini(place_info: str, gemini_key: str = "") -> dict:
+async def _classify_with_gemini(place_info: str, gemini_key: str) -> dict:
     """Gemini with thinking disabled — returns clean JSON directly.
 
-    Tries gemini-2.5-flash first; falls back to gemini-2.5-flash-lite on 503.
+    Tries gemini-2.5-flash first; falls back to gemini-2.5-flash-lite on
+    503 (overloaded) or 429 (quota exhausted) — quota is tracked per-model
+    on the free tier, so flash-lite often still has headroom when flash
+    doesn't.
     """
     from google.genai import types as gt
     from google.genai import errors as ge
     from agent.ai_client import _gemini_client
-    import os
 
-    key = gemini_key or os.environ.get("GEMINI_API_KEY", "")
-    if not key:
+    if not gemini_key:
         raise ValueError("No Gemini API key available")
 
-    client = _gemini_client(key)
+    client = _gemini_client(gemini_key)
     prompt = f"صنف هذا العميل واكتب له رسالة:\n{place_info}"
 
     for model in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
@@ -222,13 +223,14 @@ async def _classify_with_gemini(place_info: str, gemini_key: str = "") -> dict:
             if not text:
                 raise ValueError("Empty response from Gemini")
             return _parse_gemini_json(text)
-        except ge.ServerError as e:
-            if "503" in str(e) or "UNAVAILABLE" in str(e):
-                logger.warning(f"{model} overloaded, trying next model...")
+        except (ge.ServerError, ge.ClientError) as e:
+            msg = str(e)
+            if any(s in msg for s in ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED")):
+                logger.warning(f"{model} unavailable ({msg[:80]}), trying next model...")
                 continue
             raise
 
-    raise RuntimeError("All Gemini models unavailable (503)")
+    raise RuntimeError("All Gemini models unavailable (503/429)")
 
 
 async def _classify_with_gemini_http(place_info: str, gemini_key: str) -> dict:
@@ -242,11 +244,14 @@ async def classify_and_draft(
     gemini_key: str = "",
 ) -> Optional[dict]:
     """
-    يصنّف العميل ويكتب الرسالة — Claude أولاً، Gemini احتياطياً.
+    يصنّف العميل ويكتب الرسالة عبر Gemini.
 
-    FIX 1 — Prompt Caching : system prompt يُخزَّن في Anthropic (~90% توفير)
-    FIX 2 — Semaphore      : أقصى 5 استدعاءات متزامنة
-    Fallback               : Gemini إذا نفد رصيد Claude أو حدث خطأ
+    FIX 2 — Semaphore: أقصى 5 استدعاءات متزامنة.
+
+    كانت هذي الدالة تجرب مرتين: مرة بدون مفتاح صريح (تعتمد على متغير بيئة
+    GEMINI_API_KEY غير المضبوط فعلياً بهذا النشر — تفشل دائمًا فورًا بخطأ
+    "لا يوجد مفتاح")، ثم مرة بالمفتاح الصريح. المحاولة الأولى كانت ميتة
+    دائمًا — أُزيلت، الاستدعاء الآن مباشر بالمفتاح الصريح فقط.
     """
     async with semaphore:
         place_info = (
@@ -258,16 +263,6 @@ async def classify_and_draft(
             f"الموقع الإلكتروني: {place.get('website', 'غير متوفر')}\n"
         )
 
-        # ── المحاولة 1: Gemini (env key) ──────────────────────────────────────
-        try:
-            result = await _classify_with_gemini(place_info)
-            result["place"] = place
-            result["_engine"] = "gemini"
-            return result
-        except Exception as e:
-            logger.warning(f"Gemini attempt 1 failed [{place.get('name')}]: {e}")
-
-        # ── المحاولة 2: Gemini (explicit key) ─────────────────────────────────
         if not gemini_key:
             logger.error(f"Gemini key غير مضبوط — تخطي [{place.get('name')}]")
             return None
@@ -275,10 +270,9 @@ async def classify_and_draft(
             result = await _classify_with_gemini(place_info, gemini_key)
             result["place"] = place
             result["_engine"] = "gemini"
-            logger.info(f"✅ Gemini أكمل بنجاح [{place.get('name')}]")
             return result
         except Exception as e:
-            logger.error(f"Gemini attempt 2 failed [{place.get('name')}]: {e}")
+            logger.error(f"Gemini classification failed [{place.get('name')}]: {e}")
             return None
 
 
