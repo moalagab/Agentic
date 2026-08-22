@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 
 from channels.webhook_server import app
+import logging_redaction as _redaction
 from config import get_settings
 
 
@@ -31,6 +32,7 @@ def configure_logging(log_level: str) -> None:
         processors=[
             structlog.contextvars.merge_contextvars,
             structlog.processors.add_log_level,
+            _redaction.build_redactor(),
             structlog.processors.TimeStamper(fmt="iso"),
             structlog.dev.ConsoleRenderer() if sys.stdout.isatty()
             else structlog.processors.JSONRenderer(),

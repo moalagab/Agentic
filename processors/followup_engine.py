@@ -37,6 +37,53 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
+# الحد الأقصى لمحاولات الإرسال الفاشلة قبل إغلاق سجل المتابعة نهائيًا.
+_MAX_SEND_FAILURES = 3
+
+
+def _normalize_wa_phone(raw: str) -> str:
+    """
+    طبّع الرقم إلى صيغة E.164 وأعد "" إذا كان غير صالح للواتساب.
+
+    يمنع حالتين رصدناهما فعليًا في الإنتاج:
+      • "+" وحده (375 محاولة فاشلة) — نص غير فارغ فيمر من `if not phone`
+      • معرّف محادثة تيليجرام مثل 141476642177168 (106 محاولات) — 15 رقمًا
+        بلا رمز دولة صالح، سُجّل في حقل الهاتف بالخطأ
+    """
+    digits = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    if not digits:
+        return ""
+    # E.164: 8–15 رقمًا، ولا يبدأ بصفر
+    if not (8 <= len(digits) <= 15) or digits[0] == "0":
+        return ""
+    # معرّفات تيليجرام تقع في نطاق 13–16 رقمًا بلا رمز دولة معروف؛
+    # نقبل فقط الأرقام التي تبدأ برمز دولة معقول الطول.
+    if len(digits) >= 14 and not digits.startswith(("966", "971", "973", "974", "965", "968", "962", "20")):
+        return ""
+    return "+" + digits
+
+
+def _bump_send_failure(followup_id) -> int:
+    """سجّل محاولة إرسال فاشلة لهذه المتابعة وأعد العدد التراكمي."""
+    try:
+        from employee.memory import _get_conn
+        with _get_conn() as conn:
+            conn.execute(
+                "INSERT INTO agent_actions (action_type, description, result, lead_id, created_at)"
+                " VALUES ('followup_send_failure', 'فشل إرسال متابعة', 'failed', ?, ?)",
+                (str(followup_id), datetime.utcnow().isoformat()),
+            )
+            row = conn.execute(
+                "SELECT COUNT(*) FROM agent_actions"
+                " WHERE action_type='followup_send_failure' AND lead_id=?",
+                (str(followup_id),),
+            ).fetchone()
+        return int(row[0]) if row else 1
+    except Exception:
+        # لا نستطيع العدّ — أعد الحد الأقصى حتى لا تعلق المتابعة في حلقة فشل صامتة
+        return _MAX_SEND_FAILURES
+
+
 def _queue_followup_card(lead_id: str) -> None:
     """سجّل أن بطاقة موافقة أُرسلت لهذا العميل وبانتظار الرد."""
     try:
@@ -65,21 +112,39 @@ def _resolve_followup_card(lead_id: str) -> None:
         pass
 
 
+# بطاقة موافقة لم يُبتّ فيها خلال هذه المدة تُعتبر مهجورة ولا تحجب الدفعات
+# التالية. بدون هذه المهلة يتحول الحارس إلى قفل دائم: بطاقة واحدة منسيّة
+# توقف كل المتابعات إلى الأبد (حدث فعليًا — 177 بطاقة عالقة من 2026-06-10).
+_CARD_TTL_HOURS = 48
+
+
 def _count_pending_followup_cards() -> int:
     """
-    عدد بطاقات المتابعة المرسلة ولم يُبَتّ فيها بعد.
-    = عدد queued − عدد resolved
+    عدد بطاقات المتابعة المرسلة خلال آخر _CARD_TTL_HOURS ولم يُبَتّ فيها بعد.
+
+    تُطابَق كل بطاقة بمفردها عبر lead_id (بطاقة تُعتبر مبتوتة إذا وُجد سجل
+    resolved لنفس العميل بعد وقت إرسالها)، بدلًا من طرح إجماليين تراكميين
+    عبر كل التاريخ — الطرح التراكمي يختل عند أي resolved مفقود ولا يتعافى.
     """
     try:
         from employee.memory import _get_conn
+        cutoff = (datetime.utcnow() - timedelta(hours=_CARD_TTL_HOURS)).isoformat()
         with _get_conn() as conn:
-            queued = conn.execute(
-                "SELECT COUNT(*) FROM agent_actions WHERE action_type='followup_card_queued'"
-            ).fetchone()[0]
-            resolved = conn.execute(
-                "SELECT COUNT(*) FROM agent_actions WHERE action_type='followup_card_resolved'"
-            ).fetchone()[0]
-        return max(0, queued - resolved)
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM agent_actions q
+                WHERE q.action_type = 'followup_card_queued'
+                  AND q.created_at >= ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM agent_actions r
+                      WHERE r.action_type = 'followup_card_resolved'
+                        AND r.lead_id     = q.lead_id
+                        AND r.created_at >= q.created_at
+                  )
+                """,
+                (cutoff,),
+            ).fetchone()
+        return max(0, row[0] if row else 0)
     except Exception:
         return 0
 
@@ -238,8 +303,16 @@ class FollowUpEngine:
             name  = fu.get("lead_name", "")
             stage = fu.get("stage", "")
 
+            phone = _normalize_wa_phone(phone)
             if not phone:
-                mark_follow_up_done(fu["id"], notes="لا يوجد رقم")
+                # أغلق السجل نهائيًا: رقم فاسد لن يصبح صالحًا بإعادة المحاولة،
+                # وتركه مفتوحًا يعيد نفس الفشل كل ساعتين بلا نهاية.
+                mark_follow_up_done(fu["id"], notes=f"رقم غير صالح: {fu.get('lead_phone', '')!r}")
+                self._log.warning(
+                    "followup.invalid_phone",
+                    raw=fu.get("lead_phone", ""),
+                    lead_id=fu.get("lead_id"),
+                )
                 continue
 
             # ── 1. لا ترسل لنفس الشخص مرتين في نفس اليوم ─────────────────
@@ -275,7 +348,17 @@ class FollowUpEngine:
                     sent += 1
                     self._log.info("followup.sent", phone=phone, stage=stage)
                 else:
-                    self._log.warning("followup.send_failed", phone=phone, stage=stage)
+                    failures = _bump_send_failure(fu["id"])
+                    self._log.warning(
+                        "followup.send_failed", phone=phone, stage=stage, failures=failures
+                    )
+                    if failures >= _MAX_SEND_FAILURES:
+                        mark_follow_up_done(
+                            fu["id"], notes=f"أُغلق بعد {failures} محاولات إرسال فاشلة"
+                        )
+                        self._log.warning(
+                            "followup.gave_up", phone=phone, stage=stage, failures=failures
+                        )
             except Exception as exc:
                 self._log.error("followup.exception", phone=phone, error=str(exc))
 
@@ -339,6 +422,11 @@ class CreativeFollowupEngine:
 
     MAX_ATTEMPTS = 3
 
+    # أقصى عدد بطاقات موافقة تُرسَل في الدورة الواحدة. بدون هذا السقف كانت
+    # أول دورة بعد رفع الانسداد سترسل بطاقة لكل عميل مؤهَّل دفعةً واحدة
+    # (336 عميلًا حاليًا) — إغراق لتيليجرام يجعل المراجعة البشرية مستحيلة.
+    MAX_CARDS_PER_RUN = 10
+
     def __init__(
         self,
         crm: Any,
@@ -364,17 +452,57 @@ class CreativeFollowupEngine:
             return results
 
         leads = await self._fetch_followup_candidates()
+
+        # ── 1. صفِّ المرشّحين قبل توزيع الحصة ──────────────────────────
+        # الترشيح يسبق التوزيع عمدًا: لو وزّعنا أولًا لضاعت مقاعد على
+        # عملاء يُستبعدون لاحقًا (رقم فاسد أو غير مستحقّ بعد).
+        eligible: list[dict] = []
         for lead in leads:
+            # تجاهل السجلات ذات الأرقام الفاسدة (مجموعات واتساب، بثوث
+            # الحالة، معرّفات LID). توليد بطاقة موافقة لها يستهلك مراجعة
+            # بشرية لرسالة يستحيل إرسالها أصلًا.
+            if not _normalize_wa_phone(lead.get("phone", "")):
+                self._log.debug(
+                    "creative_followup.skip_invalid_phone",
+                    raw=str(lead.get("phone"))[:30],
+                    lead_id=lead.get("id"),
+                )
+                results["skipped_invalid_phone"] = results.get("skipped_invalid_phone", 0) + 1
+                continue
+
             count = int(lead.get("followup_count") or 0)
             if count >= self.MAX_ATTEMPTS:
                 await self._mark_lost(lead)
                 results["marked_lost"] += 1
                 continue
             if self._is_due(lead, count):
-                ok = await self._send_approval_card(lead, count)
-                if ok:
-                    _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
-                    results["approval_cards_sent"] += 1
+                eligible.append(lead)
+
+        # ── 2. وزّع مقاعد الدفعة بين الشريحة الأولى وبقية الشرائح ──────
+        try:
+            from processors.icp_engine import allocate_by_quota, PRIMARY_SHARE
+            batch = allocate_by_quota(eligible, self.MAX_CARDS_PER_RUN)
+            share = PRIMARY_SHARE
+        except Exception:
+            batch, share = eligible[: self.MAX_CARDS_PER_RUN], None
+
+        # ── 3. أرسل بطاقات الدفعة ─────────────────────────────────────
+        for lead in batch:
+            ok = await self._send_approval_card(lead, int(lead.get("followup_count") or 0))
+            if ok:
+                _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
+                results["approval_cards_sent"] += 1
+
+        if len(eligible) > len(batch):
+            from collections import Counter
+            mix = Counter(str(l.get("icp_segment") or "—") for l in batch)
+            self._log.info(
+                "creative_followup.batch_cap_reached",
+                sent=results["approval_cards_sent"],
+                remaining_candidates=len(eligible) - len(batch),
+                primary_share=share,
+                mix=dict(mix),
+            )
         return results
 
     def _is_due(self, lead: dict, attempt: int) -> bool:
@@ -402,7 +530,17 @@ class CreativeFollowupEngine:
                     .neq("phone", "")
                     .execute()
             )
-            return [r for r in (result.data or []) if int(r.get("followup_count") or 0) <= self.MAX_ATTEMPTS]
+            rows = [r for r in (result.data or []) if int(r.get("followup_count") or 0) <= self.MAX_ATTEMPTS]
+            # رتّب بأولوية الشريحة: السقف 10 بطاقات لكل دورة يعني أن
+            # الترتيب هو ما يقرّر *من* يُتواصَل معه فعلًا. بلا ترتيب كان
+            # الاختيار يتبع ترتيب قاعدة البيانات الاعتباطي، فيقف عميل
+            # Meal Run خلف 300 عميل آخر بلا سبب.
+            try:
+                from processors.icp_engine import lead_priority_key
+                rows.sort(key=lead_priority_key)
+            except Exception:
+                pass
+            return rows
         except Exception as exc:
             self._log.error("followup.fetch_failed", error=str(exc))
             return []

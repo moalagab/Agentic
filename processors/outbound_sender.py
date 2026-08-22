@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import TYPE_CHECKING, Optional
 
 import structlog
@@ -36,6 +36,10 @@ class OutboundSender:
     Sends personalized WhatsApp outreach only after owner approval via Telegram.
     Daily cap: 10 messages. Approval gate prevents unsupervised outreach.
     """
+
+    # بطاقة موافقة لم يُبتّ فيها خلال هذه المدة تُعتبر مهجورة: لا تحجب
+    # الدفعات التالية، ويُعاد العميل إلى PENDING لعرضه مجددًا لاحقًا.
+    CARD_TTL_HOURS = 48
 
     def __init__(
         self,
@@ -67,6 +71,9 @@ class OutboundSender:
         if not self.telegram or not self.owner_chat_ids:
             self._log.warning("outbound.no_telegram_configured")
             return {"status": "no_telegram", "sent_to_telegram": 0}
+
+        # حرّر البطاقات المهجورة أولًا، ثم افحص ما تبقّى فعلًا بانتظار الرد
+        await self._expire_stale_cards()
 
         # لا ترسل دفعة جديدة إذا لا تزال هناك بطاقات بانتظار ردك
         awaiting = await self._count_awaiting_approval()
@@ -230,8 +237,26 @@ class OutboundSender:
 
     # ── Supabase helpers ───────────────────────────────────────────────────────
 
+
+    # نافذة الجلب قبل الترتيب. PostgREST لا يدعم ترتيبًا بأولوية مخصّصة،
+    # فنجلب نافذة أوسع ونرتّبها في بايثون ثم نقصّها.
+    _PRIORITY_WINDOW = 200
+
+    @staticmethod
+    def _sort_by_priority(rows: list[dict], limit: int) -> list[dict]:
+        """وزّع مقاعد الدفعة بين الشريحة الأولى وبقية الشرائح.
+
+        الترتيب المطلق بالأولوية كان يعني ألّا يصل الدور إلى premium_fb
+        أو horeca لأسابيع مع 330 عميلًا متراكمًا وسقف 20 رسالة يوميًا.
+        """
+        try:
+            from processors.icp_engine import allocate_by_quota
+            return allocate_by_quota(rows, limit)
+        except Exception:
+            return rows[:limit]
+
     async def _fetch_pending(self, limit: int) -> list[dict]:
-        """Fetch leads with approval_status=PENDING, phone set, status=new."""
+        """يُعيد العملاء المرشّحين مرتّبين بأولوية الشريحة (Meal Run أولًا)."""
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
@@ -242,11 +267,14 @@ class OutboundSender:
                     .not_.is_("phone", "null")
                     .neq("phone", "")
                     .eq("status", "new")
-                    .order("score", desc=True)
-                    .limit(limit)
+                    # نافذة أوسع من المطلوب ثم ترتيب بالشريحة في بايثون:
+                    # PostgREST لا يرتّب بأولوية مخصّصة، والاكتفاء بـ
+                    # order(score) كان يُخرج عملاء Meal Run من النافذة.
+                    .order("icp_score", desc=True)
+                    .limit(max(limit, self._PRIORITY_WINDOW))
                     .execute()
             )
-            return result.data or []
+            return self._sort_by_priority(result.data or [], limit)
         except Exception:
             # Fallback: approval_status column may not exist yet
             try:
@@ -258,10 +286,10 @@ class OutboundSender:
                         .neq("phone", "")
                         .eq("status", "new")
                         .order("score", desc=True)
-                        .limit(limit)
+                        .limit(max(limit, self._PRIORITY_WINDOW))
                         .execute()
                 )
-                return result.data or []
+                return self._sort_by_priority(result.data or [], limit)
             except Exception as exc:
                 self._log.error("outbound.fetch_failed", error=str(exc))
                 return []
@@ -322,18 +350,51 @@ class OutboundSender:
         return filtered
 
     async def _count_awaiting_approval(self) -> int:
-        """عدد البطاقات التي أُرسلت للتيليغرام ولم يُبَتّ فيها بعد (BATCH_SENT)."""
+        """عدد البطاقات المرسلة للتيليغرام خلال آخر CARD_TTL_HOURS ولم يُبَتّ فيها.
+
+        البطاقات الأقدم من المهلة تُعتبر مهجورة ولا تحجب الدفعات التالية:
+        بدون هذا القيد تكفي بطاقة واحدة منسيّة لتجميد الإرسال إلى الأبد
+        (حدث فعليًا — 10 بطاقات عالقة جمّدت النظام من 2026-06-13).
+        """
         loop = asyncio.get_running_loop()
+        cutoff = (datetime.utcnow() - timedelta(hours=self.CARD_TTL_HOURS)).isoformat()
         try:
             result = await loop.run_in_executor(
                 None,
                 lambda: self.crm.client.table("leads")
                     .select("id", count="exact")
                     .eq("approval_status", "BATCH_SENT")
+                    .gte("updated_at", cutoff)
                     .execute()
             )
             return result.count or 0
         except Exception:
+            return 0
+
+    async def _expire_stale_cards(self) -> int:
+        """أعد البطاقات المهجورة إلى PENDING ليعاد عرضها في دفعة لاحقة.
+
+        بدون هذا تبقى البطاقة عالقة في BATCH_SENT إلى الأبد: لا تُحتسب ضمن
+        الحجب (بعد المهلة) ولا يُعاد ترشيحها للإرسال — أي أن العميل يسقط
+        من خط المبيعات بصمت.
+        """
+        loop = asyncio.get_running_loop()
+        cutoff = (datetime.utcnow() - timedelta(hours=self.CARD_TTL_HOURS)).isoformat()
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: self.crm.client.table("leads")
+                    .update({"approval_status": "PENDING"})
+                    .eq("approval_status", "BATCH_SENT")
+                    .lt("updated_at", cutoff)
+                    .execute()
+            )
+            n = len(result.data or [])
+            if n:
+                self._log.info("outbound.expired_stale_cards", count=n)
+            return n
+        except Exception as exc:
+            self._log.warning("outbound.expire_stale_failed", error=str(exc))
             return 0
 
     async def _count_today_sent(self) -> int:

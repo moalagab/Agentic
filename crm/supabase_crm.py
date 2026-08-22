@@ -53,6 +53,11 @@ def _lead_to_row(lead: Lead) -> dict[str, Any]:
         "confidence_score": int(getattr(lead, "confidence_score", 0) or 0),
         "probability_to_close": float(getattr(lead, "probability_to_close", 0) or 0),
         "expected_deal_value": float(getattr(lead, "expected_deal_value", 0) or 0),
+        # حقول ICP — كانت تُحسَب في التنقيب ثم تُهمَل هنا بصمت لأن الخريطة
+        # لم تكن تمرّرها إلى الصف: لا خطأ ولا تحذير، فقط تصنيف يضيع.
+        "icp_score": int(getattr(lead, "icp_score", 0) or 0),
+        "icp_segment": getattr(lead, "icp_segment", None),
+        "buying_signals": list(getattr(lead, "buying_signals", []) or []),
     }
     return row
 
@@ -113,6 +118,8 @@ class SupabaseCRM(BaseCRM):
         "deal_stage", "deal_stage_updated_at", "first_response_at",
         "response_time_minutes", "estimated_monthly_revenue", "estimated_trips",
         "confidence_score", "probability_to_close", "expected_deal_value",
+        # تُحذف تلقائيًا إذا لم تُطبَّق هجرة الأعمدة بعد، فلا يتعطّل الإدخال
+        "icp_score", "icp_segment", "buying_signals",
     })
 
     async def create_lead(self, lead: "Lead | LeadCreate") -> str:

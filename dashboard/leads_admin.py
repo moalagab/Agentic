@@ -5,6 +5,8 @@ CRUD interface for managing leads: view, search, update stage, add notes, delete
 
 from __future__ import annotations
 
+import html
+import json
 from datetime import datetime
 from typing import Any
 
@@ -53,11 +55,56 @@ def _priority_badge(priority: str) -> str:
     return f'<span style="color:{color};font-weight:600;font-size:13px">{label}</span>'
 
 
+def _esc(value) -> str:
+    """هروب HTML لأي قيمة قادمة من بيانات العميل.
+
+    اسم العميل وشركته وملاحظاته تصل من نماذج الموقع وواتساب — أي أنها
+    مُدخَل من الخارج. حقنها الخام في HTML سمح بتنفيذ JavaScript في متصفح
+    من يفتح اللوحة (XSS مخزَّن).
+    """
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _js(value) -> str:
+    """هروب قيمة توضع داخل نص JavaScript **بداخل خاصية HTML** مثل onclick.
+
+    السياق مزدوج، فيلزم هروبان بالترتيب:
+      1. هروب JavaScript  — حتى لا تُنهي القيمةُ نصَّ الـ JS
+      2. هروب خاصية HTML — حتى لا تُنهي علامةُ الاقتباس المزدوجة الخاصيةَ
+         نفسها (`onclick="..."`) وتُحقن معالج أحداث جديد
+    الاكتفاء بالأول يترك الثغرة مفتوحة عبر المحرف `"`.
+    """
+    js = json.dumps(str(value if value is not None else ""))[1:-1].replace("'", "\\'")
+    return html.escape(js, quote=True)
+
+
+# تسميات الشرائح بالعربية + لون لكل شريحة
+ICP_LABELS: dict[str, tuple[str, str]] = {
+    "premium_fb":        ("أغذية فاخرة", "#7c3aed"),
+    "horeca":            ("فنادق ومطاعم", "#0891b2"),
+    "fresh_food":        ("طازج", "#059669"),
+    "meal_subscription": ("Meal Run", "#d97706"),
+    "not_icp":           ("خارج النطاق", "#94a3b8"),
+}
+
+
+def _icp_badge(segment: str, score: int) -> str:
+    """شارة الشريحة مع النتيجة. الشريحة هي المعلومة، والرقم يرتّب داخلها."""
+    label, color = ICP_LABELS.get(str(segment or ""), ("—", "#94a3b8"))
+    if label == "—":
+        return '<span style="color:#cbd5e1">—</span>'
+    return (
+        f'<span style="background:{color}18;color:{color};border:1px solid {color}44;'
+        f'padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap">'
+        f'{html.escape(label)} {int(score)}</span>'
+    )
+
+
 def _wa_link(phone: str) -> str:
     if not phone:
         return "—"
     clean = phone.replace("+", "").replace(" ", "")
-    return f'<a href="https://wa.me/{clean}" target="_blank" style="color:#25d366;text-decoration:none">📱 {phone}</a>'
+    return f'<a href="https://wa.me/{html.escape(clean, quote=True)}" target="_blank" style="color:#25d366;text-decoration:none">📱 {html.escape(str(phone), quote=True)}</a>'
 
 
 def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = "") -> str:
@@ -80,17 +127,22 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
     # Table rows
     rows = ""
     for i, l in enumerate(leads, 1):
-        lid       = l.get("id", "")
-        name      = l.get("name", "—")
-        company   = l.get("company") or "—"
+        # كل قيمة قادمة من بيانات العميل تُهرَّب قبل وضعها في HTML
+        lid       = _esc(l.get("id", ""))
+        name      = _esc(l.get("name", "—"))
+        company   = _esc(l.get("company") or "—")
         phone     = l.get("phone") or ""
-        source    = SOURCE_LABELS.get(str(l.get("source") or ""), str(l.get("source") or "—"))
-        stage     = str(l.get("deal_stage") or l.get("status") or "NEW_LEAD")
-        priority  = str(l.get("priority") or "medium").lower()
-        score     = l.get("score") or 0
-        icp_score = l.get("icp_score") or 0
-        icp_seg   = l.get("icp_segment") or "—"
-        notes     = (l.get("notes") or "")[:60]
+        source    = _esc(SOURCE_LABELS.get(str(l.get("source") or ""), str(l.get("source") or "—")))
+        stage     = _esc(str(l.get("deal_stage") or l.get("status") or "NEW_LEAD"))
+        priority  = _esc(str(l.get("priority") or "medium").lower())
+        score     = int(l.get("score") or 0)
+        icp_score = int(l.get("icp_score") or 0)
+        icp_seg   = str(l.get("icp_segment") or "")
+        icp_badge = _icp_badge(icp_seg, icp_score)
+        notes     = _esc((l.get("notes") or "")[:60])
+        # قيم مخصّصة للسياق داخل نص JavaScript (onclick)
+        js_lid, js_name  = _js(l.get("id", "")), _js(l.get("name", ""))
+        js_stage, js_pri = _js(stage), _js(priority)
         rev       = float(l.get("expected_monthly_revenue") or 0)
         created   = str(l.get("created_at") or "")[:10]
 
@@ -111,14 +163,14 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
           <td style="padding:10px 8px;text-align:center">
             <span style="background:#3b82f6;color:white;padding:2px 7px;border-radius:10px;font-size:11px">{score}</span>
           </td>
-          <td style="padding:10px 8px;text-align:center;font-size:12px;color:#7c3aed">{icp_score}</td>
+          <td style="padding:10px 8px;text-align:center">{icp_badge}</td>
           <td style="padding:10px 8px;text-align:right;font-size:13px;color:#059669">{int(rev):,}</td>
           <td style="padding:10px 8px;font-size:12px;color:#475569;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{notes}</td>
           <td style="padding:10px 8px;font-size:11px;color:#94a3b8">{created}</td>
           <td style="padding:10px 8px">
             <div style="display:flex;gap:4px">
-              <button onclick="openEdit('{lid}','{name}','{stage}','{priority}')" style="background:#3b82f6;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">✏️ تعديل</button>
-              <button onclick="deleteLead('{lid}','{name}')" style="background:#ef4444;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">🗑️</button>
+              <button onclick="openEdit('{js_lid}','{js_name}','{js_stage}','{js_pri}')" style="background:#3b82f6;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">✏️ تعديل</button>
+              <button onclick="deleteLead('{js_lid}','{js_name}')" style="background:#ef4444;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">🗑️</button>
             </div>
           </td>
         </tr>"""
