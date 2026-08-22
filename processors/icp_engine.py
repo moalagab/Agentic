@@ -297,3 +297,52 @@ def lead_priority_key(lead: dict) -> tuple[int, int, int]:
         -int(lead.get("icp_score") or 0),
         -int(lead.get("score") or 0),
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# توزيع الحصة اليومية بين الشريحة الأولى وبقية الشرائح
+# ═══════════════════════════════════════════════════════════════════════
+# الترتيب المطلق بالأولوية كان يعني تجويع بقية الشرائح فعليًا: مع سقف
+# 10 بطاقات لكل دورة و330 عميلًا متراكمًا، لن يصل الدور إلى premium_fb
+# أو horeca لأسابيع. الحصة تحفظ صدارة الشريحة الأولى دون إقصاء غيرها.
+PRIMARY_SEGMENTS: frozenset[str] = frozenset({ICPSegment.MEAL_SUBSCRIPTION.value})
+
+# نصيب الشريحة الأولى من كل دفعة. غيّر هذا الرقم وحده لتعديل التوزيع.
+PRIMARY_SHARE = 0.70
+
+
+def allocate_by_quota(
+    leads: list[dict],
+    limit: int,
+    primary_share: float = PRIMARY_SHARE,
+) -> list[dict]:
+    """
+    وزّع مقاعد الدفعة: حصة للشريحة الأولى وحصة لبقية الشرائح.
+
+    المقاعد غير المستخدَمة تُعاد للطرف الآخر بدل أن تضيع — إن لم يوجد
+    عملاء Meal Run كافون اليوم، تأخذ بقية الشرائح مقاعدهم، والعكس. بدون
+    هذا الردم كانت الحصة ستقلّص حجم الدفعة كلما شحّت إحدى الفئتين.
+
+    داخل كل فئة يبقى الترتيب بـ lead_priority_key (الشريحة ثم قوّة
+    المطابقة)، والشريحة الأولى تتصدّر الناتج.
+    """
+    if limit <= 0 or not leads:
+        return []
+
+    ordered = sorted(leads, key=lead_priority_key)
+    primary = [l for l in ordered if str(l.get("icp_segment") or "") in PRIMARY_SEGMENTS]
+    others  = [l for l in ordered if str(l.get("icp_segment") or "") not in PRIMARY_SEGMENTS]
+
+    n_primary = min(len(primary), max(1, round(limit * primary_share)) if primary else 0)
+    n_others  = min(len(others), limit - n_primary)
+
+    # ردم المقاعد الشاغرة من الفئة التي بها فائض
+    spare = limit - n_primary - n_others
+    if spare > 0:
+        take_more_primary = min(spare, len(primary) - n_primary)
+        n_primary += take_more_primary
+        spare -= take_more_primary
+    if spare > 0:
+        n_others += min(spare, len(others) - n_others)
+
+    return primary[:n_primary] + others[:n_others]

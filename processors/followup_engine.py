@@ -452,6 +452,11 @@ class CreativeFollowupEngine:
             return results
 
         leads = await self._fetch_followup_candidates()
+
+        # ── 1. صفِّ المرشّحين قبل توزيع الحصة ──────────────────────────
+        # الترشيح يسبق التوزيع عمدًا: لو وزّعنا أولًا لضاعت مقاعد على
+        # عملاء يُستبعدون لاحقًا (رقم فاسد أو غير مستحقّ بعد).
+        eligible: list[dict] = []
         for lead in leads:
             # تجاهل السجلات ذات الأرقام الفاسدة (مجموعات واتساب، بثوث
             # الحالة، معرّفات LID). توليد بطاقة موافقة لها يستهلك مراجعة
@@ -471,17 +476,33 @@ class CreativeFollowupEngine:
                 results["marked_lost"] += 1
                 continue
             if self._is_due(lead, count):
-                ok = await self._send_approval_card(lead, count)
-                if ok:
-                    _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
-                    results["approval_cards_sent"] += 1
-                    if results["approval_cards_sent"] >= self.MAX_CARDS_PER_RUN:
-                        self._log.info(
-                            "creative_followup.batch_cap_reached",
-                            sent=results["approval_cards_sent"],
-                            remaining_candidates=len(leads) - leads.index(lead) - 1,
-                        )
-                        break
+                eligible.append(lead)
+
+        # ── 2. وزّع مقاعد الدفعة بين الشريحة الأولى وبقية الشرائح ──────
+        try:
+            from processors.icp_engine import allocate_by_quota, PRIMARY_SHARE
+            batch = allocate_by_quota(eligible, self.MAX_CARDS_PER_RUN)
+            share = PRIMARY_SHARE
+        except Exception:
+            batch, share = eligible[: self.MAX_CARDS_PER_RUN], None
+
+        # ── 3. أرسل بطاقات الدفعة ─────────────────────────────────────
+        for lead in batch:
+            ok = await self._send_approval_card(lead, int(lead.get("followup_count") or 0))
+            if ok:
+                _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
+                results["approval_cards_sent"] += 1
+
+        if len(eligible) > len(batch):
+            from collections import Counter
+            mix = Counter(str(l.get("icp_segment") or "—") for l in batch)
+            self._log.info(
+                "creative_followup.batch_cap_reached",
+                sent=results["approval_cards_sent"],
+                remaining_candidates=len(eligible) - len(batch),
+                primary_share=share,
+                mix=dict(mix),
+            )
         return results
 
     def _is_due(self, lead: dict, attempt: int) -> bool:

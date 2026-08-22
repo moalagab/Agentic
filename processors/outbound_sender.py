@@ -244,13 +244,16 @@ class OutboundSender:
 
     @staticmethod
     def _sort_by_priority(rows: list[dict], limit: int) -> list[dict]:
-        """رتّب بأولوية الشريحة ثم قوّة المطابقة، وقصّ إلى الحد المطلوب."""
+        """وزّع مقاعد الدفعة بين الشريحة الأولى وبقية الشرائح.
+
+        الترتيب المطلق بالأولوية كان يعني ألّا يصل الدور إلى premium_fb
+        أو horeca لأسابيع مع 330 عميلًا متراكمًا وسقف 20 رسالة يوميًا.
+        """
         try:
-            from processors.icp_engine import lead_priority_key
-            rows = sorted(rows, key=lead_priority_key)
+            from processors.icp_engine import allocate_by_quota
+            return allocate_by_quota(rows, limit)
         except Exception:
-            pass
-        return rows[:limit]
+            return rows[:limit]
 
     async def _fetch_pending(self, limit: int) -> list[dict]:
         """يُعيد العملاء المرشّحين مرتّبين بأولوية الشريحة (Meal Run أولًا)."""
