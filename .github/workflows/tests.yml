@@ -1,0 +1,31 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # 3.12 هو الحد الأدنى الفعلي: الكود يستخدم شرطة عكسية داخل
+          # تعبير f-string (PEP 701)، وهو خطأ صياغة على 3.11 فما دون.
+          python-version: "3.12"
+
+      - name: تثبيت pytest
+        run: python -m pip install --quiet pytest
+
+      - name: فحص الصياغة لكل الوحدات
+        # يمسك ما لا يمسكه pytest: ملف لا يستورده أي اختبار وبه خطأ
+        # صياغة كان سيُنشر ويُسقط الخدمة عند الإقلاع.
+        run: python -m compileall -q agent channels crm dashboard employee models processors config.py main.py
+
+      - name: الاختبارات
+        # الاختبارات لا تلمس الشبكة ولا قاعدة بيانات الإنتاج، فلا تحتاج
+        # أي أسرار — وهذا شرط لبقائها قابلة للتشغيل في CI.
+        run: python -m pytest tests/ -q
