@@ -78,6 +78,28 @@ def _js(value) -> str:
     return html.escape(js, quote=True)
 
 
+# تسميات الشرائح بالعربية + لون لكل شريحة
+ICP_LABELS: dict[str, tuple[str, str]] = {
+    "premium_fb":        ("أغذية فاخرة", "#7c3aed"),
+    "horeca":            ("فنادق ومطاعم", "#0891b2"),
+    "fresh_food":        ("طازج", "#059669"),
+    "meal_subscription": ("Meal Run", "#d97706"),
+    "not_icp":           ("خارج النطاق", "#94a3b8"),
+}
+
+
+def _icp_badge(segment: str, score: int) -> str:
+    """شارة الشريحة مع النتيجة. الشريحة هي المعلومة، والرقم يرتّب داخلها."""
+    label, color = ICP_LABELS.get(str(segment or ""), ("—", "#94a3b8"))
+    if label == "—":
+        return '<span style="color:#cbd5e1">—</span>'
+    return (
+        f'<span style="background:{color}18;color:{color};border:1px solid {color}44;'
+        f'padding:2px 7px;border-radius:10px;font-size:11px;white-space:nowrap">'
+        f'{html.escape(label)} {int(score)}</span>'
+    )
+
+
 def _wa_link(phone: str) -> str:
     if not phone:
         return "—"
@@ -115,7 +137,8 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
         priority  = _esc(str(l.get("priority") or "medium").lower())
         score     = int(l.get("score") or 0)
         icp_score = int(l.get("icp_score") or 0)
-        icp_seg   = _esc(l.get("icp_segment") or "—")
+        icp_seg   = str(l.get("icp_segment") or "")
+        icp_badge = _icp_badge(icp_seg, icp_score)
         notes     = _esc((l.get("notes") or "")[:60])
         # قيم مخصّصة للسياق داخل نص JavaScript (onclick)
         js_lid, js_name  = _js(l.get("id", "")), _js(l.get("name", ""))
@@ -140,7 +163,7 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
           <td style="padding:10px 8px;text-align:center">
             <span style="background:#3b82f6;color:white;padding:2px 7px;border-radius:10px;font-size:11px">{score}</span>
           </td>
-          <td style="padding:10px 8px;text-align:center;font-size:12px;color:#7c3aed">{icp_score}</td>
+          <td style="padding:10px 8px;text-align:center">{icp_badge}</td>
           <td style="padding:10px 8px;text-align:right;font-size:13px;color:#059669">{int(rev):,}</td>
           <td style="padding:10px 8px;font-size:12px;color:#475569;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{notes}</td>
           <td style="padding:10px 8px;font-size:11px;color:#94a3b8">{created}</td>
