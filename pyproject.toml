@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smartfield-agent"
+version = "1.0.0"
+description = "Smart Field — وكيل توليد العملاء المحتملين للنقل المبرد"
+requires-python = ">=3.12"
+
+# ملاحظة: >=3.12 ليست تفضيلًا. الكود يستخدم شرطة عكسية داخل تعبير
+# f-string (PEP 701)، وهو خطأ صياغة على 3.11 فما دون — أي أن المشروع
+# كان يتطلب 3.12 ضمنًا دون أن يصرّح بذلك في أي مكان.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    # utcnow() مهجورة في 3.12+ ومستخدمة في أنحاء المشروع. نُسكتها هنا
+    # حتى لا تغرق مخرجات الاختبار، لا لأنها غير مهمة — انظر المهمة
+    # المفتوحة في README حول الانتقال إلى datetime.now(UTC).
+    "ignore:datetime.datetime.utcnow:DeprecationWarning",
+]
