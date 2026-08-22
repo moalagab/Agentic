@@ -8,8 +8,10 @@ Type=simple
 User=smartfield
 Group=smartfield
 WorkingDirectory=/home/smartfield/app
+# الربط على 127.0.0.1 فقط: nginx هو المنفذ العام الوحيد. الربط على
+# 0.0.0.0 كان يكشف التطبيق مباشرةً على المنفذ 8000 متجاوزًا nginx و TLS.
 ExecStart=/home/smartfield/app/.venv/bin/uvicorn channels.webhook_server:app \
-    --host 0.0.0.0 \
+    --host 127.0.0.1 \
     --port 8000 \
     --workers 1 \
     --log-level info

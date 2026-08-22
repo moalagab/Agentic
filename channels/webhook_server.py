@@ -14,6 +14,7 @@ Exposes HTTP endpoints for all inbound lead channels:
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from collections import OrderedDict  # noqa: F401 — kept for potential future use
 from contextlib import asynccontextmanager
@@ -294,7 +295,8 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # "*" السابقة كانت تسمح لأي موقع باستدعاء كل النقاط من متصفح الزائر
+    allow_origins=get_settings().cors_origins_list(),
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["authorization", "content-type", "x-api-key", "x-li-signature"],
@@ -324,12 +326,18 @@ def require_admin_key(
     """
     configured_key = settings.ADMIN_API_KEY
     if not configured_key:
-        logger.warning(
-            "admin_endpoint_unauthenticated",
-            reason="ADMIN_API_KEY not configured — request allowed without auth",
+        # يفشل مغلقًا: السماح مع تحذير يعني أن خطأ نشر واحد يترك حذف
+        # العملاء ولوحة الإدارة مفتوحين للإنترنت، والتحذير لا يمنع شيئًا.
+        logger.error(
+            "admin_endpoint_denied",
+            reason="ADMIN_API_KEY not configured — refusing request",
         )
-        return  # dev mode — no key configured, allow all
-    if x_api_key != configured_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Admin API is not configured on this server",
+        )
+    # مقارنة ثابتة الزمن — تمنع استنتاج المفتاح بقياس زمن الرد
+    if not x_api_key or not hmac.compare_digest(x_api_key, configured_key):
         raise HTTPException(
             status_code=403,
             detail="Invalid or missing X-API-Key header",
@@ -486,6 +494,7 @@ async def get_lead_status(lead_id: str) -> dict:
 @app.get("/api/analytics", tags=["Analytics"])
 async def get_analytics(
     pipeline: LeadPipeline = Depends(get_pipeline),
+    _admin: None = Depends(require_admin_key),
 ) -> dict:
     """Get pipeline analytics from the configured CRM."""
     try:
@@ -517,8 +526,14 @@ async def admin_leads_page(
         html = render_leads_admin(leads, search=search, stage_filter=stage)
         return Response(content=html, media_type="text/html; charset=utf-8")
     except Exception as exc:
-        logger.error("Admin leads page failed", error=str(exc))
-        return Response(content=f"<h1>Error</h1><pre>{exc}</pre>", media_type="text/html")
+        # لا تعرض نص الاستثناء للمتصفح: قد يحوي مسارات داخلية أو أجزاء
+        # من إعدادات الاتصال. التفاصيل تبقى في السجل فقط.
+        logger.error("Admin leads page failed", error=str(exc), exc_info=True)
+        return Response(
+            content="<h1>خطأ داخلي</h1><p>راجع سجل الخادم للتفاصيل.</p>",
+            media_type="text/html; charset=utf-8",
+            status_code=500,
+        )
 
 
 @app.post("/api/lead/{lead_id}/update", tags=["Leads"])
@@ -574,7 +589,7 @@ async def delete_lead(lead_id: str, _: None = Depends(require_admin_key)) -> dic
 
 
 @app.get("/dashboard", tags=["Dashboard"], response_class=Response)
-async def revenue_dashboard() -> Response:
+async def revenue_dashboard(_admin: None = Depends(require_admin_key)) -> Response:
     """
     Live Revenue Dashboard — لوحة الإيرادات الحية.
     Auto-refreshes every 2 minutes.
@@ -707,7 +722,7 @@ async def mark_lead_responded(lead_id: str) -> dict:
 
 
 @app.get("/api/sla/stats", tags=["Analytics"])
-async def get_sla_stats() -> dict:
+async def get_sla_stats(_admin: None = Depends(require_admin_key)) -> dict:
     """Return SLA compliance statistics."""
     if not _sla_monitor:
         return {"error": "SLA monitor not initialized"}
@@ -789,7 +804,7 @@ async def generate_cpq_quote(req: CPQRequest) -> dict:
 
 
 @app.get("/api/cpq/vehicles", tags=["CPQ"])
-async def list_vehicles() -> dict:
+async def list_vehicles(_admin: None = Depends(require_admin_key)) -> dict:
     """List available vehicle types and their specs."""
     from processors.cpq_engine import VEHICLE_CONFIG, TEMP_PREMIUMS
     return {"vehicles": VEHICLE_CONFIG, "temperature_zones": TEMP_PREMIUMS}
@@ -827,7 +842,7 @@ async def generate_content(req: ContentRequest) -> dict:
 
 
 @app.post("/api/content/weekly-plan", tags=["Content"])
-async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipeline)) -> dict:
+async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipeline), _admin: None = Depends(require_admin_key)) -> dict:
     """Generate a full 5-post weekly LinkedIn content calendar."""
     if not _content_engine:
         raise HTTPException(status_code=503, detail="Content engine not initialized")
@@ -841,7 +856,7 @@ async def generate_weekly_content_plan(pipeline: LeadPipeline = Depends(get_pipe
 
 
 @app.post("/api/content/social/generate", tags=["Content"])
-async def generate_social_content(settings: Settings = Depends(get_settings_dep)) -> dict:
+async def generate_social_content(settings: Settings = Depends(get_settings_dep), _admin: None = Depends(require_admin_key)) -> dict:
     """Trigger weekly X + Instagram content generation and upload to Buffer."""
     if not _content_engine:
         raise HTTPException(status_code=503, detail="Content engine not initialized")
@@ -898,7 +913,7 @@ async def handle_objection(body: dict) -> dict:
 # ── Customer Success Endpoints (Layer 8) ──────────────────────────────────────
 
 @app.get("/api/customer-success/opportunities", tags=["Customer Success"])
-async def get_cs_opportunities() -> dict:
+async def get_cs_opportunities(_admin: None = Depends(require_admin_key)) -> dict:
     """Get all customer success opportunities: renewals, upsells, churn risks, referrals."""
     if not _cs_engine:
         return {"success": False, "message": "Customer Success engine not initialized (Supabase required)"}
@@ -911,7 +926,7 @@ async def get_cs_opportunities() -> dict:
 
 
 @app.post("/api/customer-success/run-check", tags=["Customer Success"])
-async def run_cs_check() -> dict:
+async def run_cs_check(_admin: None = Depends(require_admin_key)) -> dict:
     """Manually trigger the customer success daily check."""
     if not _cs_engine:
         raise HTTPException(status_code=503, detail="Customer Success engine not initialized")
@@ -920,7 +935,7 @@ async def run_cs_check() -> dict:
 
 
 @app.post("/api/prospecting/run", tags=["Demand Generation"])
-async def run_prospecting() -> dict:
+async def run_prospecting(_admin: None = Depends(require_admin_key)) -> dict:
     """Manually trigger the Google Maps prospecting engine (Demand Generation)."""
     try:
         from processors.google_maps_engine import run_prospecting_engine
@@ -952,7 +967,7 @@ async def run_prospecting() -> dict:
 
 
 @app.post("/api/outbound/send", tags=["Demand Generation"])
-async def run_outbound_send() -> dict:
+async def run_outbound_send(_admin: None = Depends(require_admin_key)) -> dict:
     """Manually trigger outbound WhatsApp sends to serpapi prospects."""
     if not _outbound_sender:
         raise HTTPException(status_code=503, detail="OutboundSender not initialized")
@@ -963,7 +978,7 @@ async def run_outbound_send() -> dict:
 # ── ICP / Revenue / Attribution Endpoints ────────────────────────────────────
 
 @app.get("/api/revenue/forecast", tags=["Revenue"])
-async def get_revenue_forecast() -> dict:
+async def get_revenue_forecast(_admin: None = Depends(require_admin_key)) -> dict:
     """
     Compute pipeline forecast using Revenue Forecast Engine.
     يحسب توقعات الإيرادات بناءً على Pipeline الحالي.
@@ -988,7 +1003,7 @@ async def get_revenue_forecast() -> dict:
 
 
 @app.get("/api/attribution/report", tags=["Revenue"])
-async def get_attribution_report() -> dict:
+async def get_attribution_report(_admin: None = Depends(require_admin_key)) -> dict:
     """
     Attribution report — which sources generate revenue.
     تقرير Attribution: أي مصادر تولّد إيرادات.
@@ -1076,7 +1091,7 @@ async def knowledge_ask(req: RAGRequest, settings: Settings = Depends(get_settin
 
 
 @app.get("/api/knowledge/topics", tags=["Knowledge Base"])
-async def knowledge_topics() -> dict:
+async def knowledge_topics(_admin: None = Depends(require_admin_key)) -> dict:
     """List available knowledge base topics."""
     from processors.rag_engine import list_topics
     return {"topics": list_topics()}
@@ -1090,7 +1105,7 @@ def _safe_lead(row: dict) -> bool:
 # ── Learning Loop Endpoints (Layer 10) ────────────────────────────────────────
 
 @app.post("/api/insights/run-analysis", tags=["Intelligence"])
-async def run_win_loss_analysis() -> dict:
+async def run_win_loss_analysis(_admin: None = Depends(require_admin_key)) -> dict:
     """
     Trigger a manual win/loss analysis and learning loop.
     تشغيل تحليل Win/Loss يدوياً.
@@ -1106,7 +1121,7 @@ async def run_win_loss_analysis() -> dict:
 
 
 @app.get("/api/insights/icp", tags=["Intelligence"])
-async def get_icp_profile() -> dict:
+async def get_icp_profile(_admin: None = Depends(require_admin_key)) -> dict:
     """Get the current Ideal Customer Profile derived from won deals."""
     if not _learning_loop:
         raise HTTPException(status_code=503, detail="Learning Loop not initialized")
@@ -1119,7 +1134,7 @@ async def get_icp_profile() -> dict:
 
 
 @app.post("/api/followup/start", tags=["Sales"])
-async def start_followup_sequence(req: FollowUpRequest) -> dict:
+async def start_followup_sequence(req: FollowUpRequest, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Start the WhatsApp follow-up sequence for a lead.
     يبدأ سلسلة المتابعة عبر واتساب.
@@ -1325,7 +1340,7 @@ async def _ensure_lead_for_escalation(
 
 
 @app.post("/api/lead/unlock-thread", tags=["Leads"])
-async def unlock_thread(request: Request) -> dict:
+async def unlock_thread(request: Request, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Unlock an escalated thread so auto-reply resumes.
     POST body: {"phone": "+966XXXXXXXXX"}
@@ -1341,7 +1356,7 @@ async def unlock_thread(request: Request) -> dict:
 
 
 @app.get("/api/lead/escalated-threads", tags=["Leads"])
-async def list_escalated_threads() -> dict:
+async def list_escalated_threads(_admin: None = Depends(require_admin_key)) -> dict:
     """List currently locked threads (owner is handling these)."""
     import time
     now = time.time()
@@ -1417,6 +1432,21 @@ async def telegram_webhook(
     if not _tg_handler or not _employee:
         raise HTTPException(status_code=503, detail="Telegram not configured")
 
+    # تحقق من أن الطلب من تيليجرام فعلًا. بدونه يستطيع أي شخص إرسال
+    # تحديث مزوّر — بما فيه ضغطة زر "موافقة" — فيتجاوز بوابة الموافقة
+    # البشرية كاملةً ويطلق إرسال واتساب لعملاء حقيقيين.
+    _settings = get_settings()
+    if _settings.TELEGRAM_WEBHOOK_SECRET:
+        sent_secret = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if not hmac.compare_digest(sent_secret, _settings.TELEGRAM_WEBHOOK_SECRET):
+            logger.warning("telegram_webhook.bad_secret", ip=request.client.host if request.client else "?")
+            raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    else:
+        logger.error(
+            "telegram_webhook.unverified",
+            reason="TELEGRAM_WEBHOOK_SECRET غير مضبوط — الـ webhook غير موثّق",
+        )
+
     payload = await request.json()
 
     # Handle inline button presses (callback_query)
@@ -1469,6 +1499,17 @@ async def _handle_telegram_callback(cq: dict):
     callback_id = cq.get("id", "")
     chat_id     = cq.get("chat_id", "")
     data        = cq.get("data", "")
+
+    # لا تقبل قرارات الموافقة إلا من محادثات المُلّاك المعروفة — طبقة ثانية
+    # مستقلة عن سر الـ webhook، تصمد حتى لو تسرّب السر أو نُسي ضبطه.
+    owner_ids = {str(c) for c in get_settings().TELEGRAM_OWNER_CHAT_IDS}
+    if owner_ids and str(chat_id) not in owner_ids:
+        logger.warning("telegram_callback.unauthorized_chat", chat_id=str(chat_id)[:24], data=data[:40])
+        try:
+            await _tg_handler.answer_callback_query(callback_id, "⛔ غير مصرّح")
+        except Exception:
+            pass
+        return
 
     try:
         # Outbound approval: outbound_approve:{lead_id} / outbound_reject:{lead_id}
@@ -1537,7 +1578,7 @@ async def run_backup_now(_: None = Depends(require_admin_key)):
 
 
 @app.get("/api/backup/info", tags=["Backup"])
-async def get_backup_info():
+async def get_backup_info(_admin: None = Depends(require_admin_key)):
     if not _backup_engine:
         return {"error": "BackupEngine not initialized"}
     info = _backup_engine.get_latest_backup_info()
@@ -1547,7 +1588,7 @@ async def get_backup_info():
 # ─── A/B Test API ─────────────────────────────────────────────────────────────
 
 @app.get("/api/ab-test/stats", tags=["Analytics"])
-async def get_ab_test_stats():
+async def get_ab_test_stats(_admin: None = Depends(require_admin_key)):
     if not _ab_engine:
         return {"error": "ABTestEngine not initialized"}
     stats = await _ab_engine.get_stats()
@@ -1557,6 +1598,7 @@ async def get_ab_test_stats():
 async def setup_telegram_webhook(
     request: Request,
     settings: Settings = Depends(get_settings_dep),
+    _admin: None = Depends(require_admin_key),
 ) -> dict:
     """
     Auto-register Telegram webhook URL with Telegram servers.
@@ -1762,7 +1804,7 @@ async def website_form_webhook(
 
 
 @app.post("/api/weekly-report/send", tags=["Reports"])
-async def send_weekly_report_now() -> dict:
+async def send_weekly_report_now(_admin: None = Depends(require_admin_key)) -> dict:
     """Manually trigger the weekly Telegram report."""
     try:
         settings = get_settings()

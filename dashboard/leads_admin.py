@@ -5,6 +5,8 @@ CRUD interface for managing leads: view, search, update stage, add notes, delete
 
 from __future__ import annotations
 
+import html
+import json
 from datetime import datetime
 from typing import Any
 
@@ -53,11 +55,34 @@ def _priority_badge(priority: str) -> str:
     return f'<span style="color:{color};font-weight:600;font-size:13px">{label}</span>'
 
 
+def _esc(value) -> str:
+    """هروب HTML لأي قيمة قادمة من بيانات العميل.
+
+    اسم العميل وشركته وملاحظاته تصل من نماذج الموقع وواتساب — أي أنها
+    مُدخَل من الخارج. حقنها الخام في HTML سمح بتنفيذ JavaScript في متصفح
+    من يفتح اللوحة (XSS مخزَّن).
+    """
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _js(value) -> str:
+    """هروب قيمة توضع داخل نص JavaScript **بداخل خاصية HTML** مثل onclick.
+
+    السياق مزدوج، فيلزم هروبان بالترتيب:
+      1. هروب JavaScript  — حتى لا تُنهي القيمةُ نصَّ الـ JS
+      2. هروب خاصية HTML — حتى لا تُنهي علامةُ الاقتباس المزدوجة الخاصيةَ
+         نفسها (`onclick="..."`) وتُحقن معالج أحداث جديد
+    الاكتفاء بالأول يترك الثغرة مفتوحة عبر المحرف `"`.
+    """
+    js = json.dumps(str(value if value is not None else ""))[1:-1].replace("'", "\\'")
+    return html.escape(js, quote=True)
+
+
 def _wa_link(phone: str) -> str:
     if not phone:
         return "—"
     clean = phone.replace("+", "").replace(" ", "")
-    return f'<a href="https://wa.me/{clean}" target="_blank" style="color:#25d366;text-decoration:none">📱 {phone}</a>'
+    return f'<a href="https://wa.me/{html.escape(clean, quote=True)}" target="_blank" style="color:#25d366;text-decoration:none">📱 {html.escape(str(phone), quote=True)}</a>'
 
 
 def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = "") -> str:
@@ -80,17 +105,21 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
     # Table rows
     rows = ""
     for i, l in enumerate(leads, 1):
-        lid       = l.get("id", "")
-        name      = l.get("name", "—")
-        company   = l.get("company") or "—"
+        # كل قيمة قادمة من بيانات العميل تُهرَّب قبل وضعها في HTML
+        lid       = _esc(l.get("id", ""))
+        name      = _esc(l.get("name", "—"))
+        company   = _esc(l.get("company") or "—")
         phone     = l.get("phone") or ""
-        source    = SOURCE_LABELS.get(str(l.get("source") or ""), str(l.get("source") or "—"))
-        stage     = str(l.get("deal_stage") or l.get("status") or "NEW_LEAD")
-        priority  = str(l.get("priority") or "medium").lower()
-        score     = l.get("score") or 0
-        icp_score = l.get("icp_score") or 0
-        icp_seg   = l.get("icp_segment") or "—"
-        notes     = (l.get("notes") or "")[:60]
+        source    = _esc(SOURCE_LABELS.get(str(l.get("source") or ""), str(l.get("source") or "—")))
+        stage     = _esc(str(l.get("deal_stage") or l.get("status") or "NEW_LEAD"))
+        priority  = _esc(str(l.get("priority") or "medium").lower())
+        score     = int(l.get("score") or 0)
+        icp_score = int(l.get("icp_score") or 0)
+        icp_seg   = _esc(l.get("icp_segment") or "—")
+        notes     = _esc((l.get("notes") or "")[:60])
+        # قيم مخصّصة للسياق داخل نص JavaScript (onclick)
+        js_lid, js_name  = _js(l.get("id", "")), _js(l.get("name", ""))
+        js_stage, js_pri = _js(stage), _js(priority)
         rev       = float(l.get("expected_monthly_revenue") or 0)
         created   = str(l.get("created_at") or "")[:10]
 
@@ -117,8 +146,8 @@ def render_leads_admin(leads: list[dict], search: str = "", stage_filter: str = 
           <td style="padding:10px 8px;font-size:11px;color:#94a3b8">{created}</td>
           <td style="padding:10px 8px">
             <div style="display:flex;gap:4px">
-              <button onclick="openEdit('{lid}','{name}','{stage}','{priority}')" style="background:#3b82f6;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">✏️ تعديل</button>
-              <button onclick="deleteLead('{lid}','{name}')" style="background:#ef4444;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">🗑️</button>
+              <button onclick="openEdit('{js_lid}','{js_name}','{js_stage}','{js_pri}')" style="background:#3b82f6;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">✏️ تعديل</button>
+              <button onclick="deleteLead('{js_lid}','{js_name}')" style="background:#ef4444;color:white;border:none;padding:5px 10px;border-radius:6px;cursor:pointer;font-size:11px">🗑️</button>
             </div>
           </td>
         </tr>"""

@@ -302,9 +302,17 @@ class WhatsAppChannelHandler:
                 if not body or msg.get("type") not in ("chat", "text", None):
                     return None
                 raw_from = msg.get("from", "")  # e.g. "966501234567@c.us" or "193406689145071@lid"
-                # Ignore group chats — @g.us suffix = WhatsApp group
-                if "@g.us" in raw_from:
-                    self._log.debug("wa.group_message_ignored", chat=raw_from[:30])
+                # تجاهل كل ما ليس محادثة فردية: المجموعات (@g.us) وبث الحالة
+                # (status@broadcast) والقنوات (@newsletter). بدون هذا تُسجَّل
+                # هذه المعرّفات كعملاء ثم تُحاول المتابعة إرسال رسائل إليها —
+                # وهو مصدر سجلات مثل "+status" و"+120363..." في قاعدة البيانات.
+                if (
+                    "@g.us" in raw_from
+                    or "@broadcast" in raw_from
+                    or "@newsletter" in raw_from
+                    or raw_from.split("@")[0] == "status"
+                ):
+                    self._log.debug("wa.non_direct_chat_ignored", chat=raw_from[:40])
                     return None
                 # Keep raw_from as chatId for reply — strip @suffix for display phone
                 chat_id = raw_from

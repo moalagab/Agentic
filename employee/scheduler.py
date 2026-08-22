@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 import structlog
+
+from config import get_settings
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
@@ -92,7 +94,39 @@ class SmartfieldScheduler:
             self._running = False
             logger.info("scheduler.stopped")
 
+    async def _send_heartbeat(self) -> None:
+        """أبلغ خدمة مراقبة خارجية بأن العملية ما زالت حيّة.
+
+        هذه هي الطبقة الوحيدة القادرة على كشف موت العملية: كل التنبيهات
+        الأخرى (تيليجرام، مراقب WAHA) تعمل *داخل* هذه العملية وتموت معها.
+        لذلك مرّ انقطاع 2026-07-22 دون أي إشعار.
+
+        المنطق معكوس عمدًا: الخدمة الخارجية تنبّه عند **غياب** النبضة،
+        فلا حاجة لأن ينجح النظام في الإبلاغ عن فشله.
+        """
+        url = get_settings().HEARTBEAT_URL
+        if not url:
+            return
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.get(url)
+            logger.debug("scheduler.heartbeat_sent")
+        except Exception as exc:
+            # فشل النبضة ليس فشلًا في النظام — سجّله ولا توقف شيئًا
+            logger.warning("scheduler.heartbeat_failed", error=str(exc))
+
     def _register_jobs(self):
+        # نبضة المراقبة الخارجية — كل 5 دقائق
+        self.scheduler.add_job(
+            self._send_heartbeat,
+            CronTrigger(minute="*/5", timezone=RIYADH_TZ),
+            id="external_heartbeat",
+            name="نبضة المراقبة الخارجية",
+            replace_existing=True,
+            misfire_grace_time=120,
+        )
+
         # Daily report - every day at 9:00 AM Riyadh time
         self.scheduler.add_job(
             self._run_daily_report,

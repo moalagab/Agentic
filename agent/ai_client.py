@@ -20,7 +20,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 GEMINI_MODEL = "gemini-flash-latest"
-CLAUDE_MODEL = "claude-sonnet-4-6"
+CLAUDE_MODEL = "claude-opus-5"
 
 _GEMINI = "gemini"
 _CLAUDE = "claude"
@@ -200,7 +200,19 @@ async def _claude_text(api_key: str, system: str, user: str, max_tokens: int, mo
     if system:
         kwargs["system"] = system
     resp = await client.messages.create(**kwargs)
-    return resp.content[0].text.strip() if resp.content else ""
+
+    # رفض من مصنّفات الأمان يعود بحالة 200 مع stop_reason="refusal"
+    # وليس كاستثناء — لا بد من فحصه قبل قراءة المحتوى.
+    if getattr(resp, "stop_reason", None) == "refusal":
+        logger.warning("claude.refusal", details=str(getattr(resp, "stop_details", "")))
+        return ""
+
+    # لا تفترض أن أول كتلة هي النص: التفكير مفعّل افتراضيًا على الموديلات
+    # الحديثة، فقد تسبق كتلةُ thinking كتلةَ النص. ابحث عن أول كتلة نصية.
+    for block in resp.content or []:
+        if getattr(block, "type", None) == "text":
+            return (block.text or "").strip()
+    return ""
 
 
 async def _claude_loop(

@@ -137,6 +137,30 @@ class Settings(BaseSettings):
     X_ACCESS_TOKEN: str = Field(default="", description="X OAuth 1.0a Access Token — for posting as user")
     X_ACCESS_TOKEN_SECRET: str = Field(default="", description="X OAuth 1.0a Access Token Secret")
 
+    # ─── مراقبة خارجية (dead-man's switch) ───────────────────────────────────
+    HEARTBEAT_URL: str = Field(
+        default="",
+        description="رابط نبضة من healthchecks.io أو ما شابه — ينبّه عند غياب النبضة"
+    )
+
+    # ─── CORS ─────────────────────────────────────────────────────────────────
+    CORS_ORIGINS: str = Field(
+        default="https://agent.smartfield.sa",
+        description="النطاقات المسموح لها بالوصول عبر CORS، مفصولة بفواصل"
+    )
+
+    # ─── Telegram webhook secret ──────────────────────────────────────────────
+    TELEGRAM_WEBHOOK_SECRET: str = Field(
+        default="",
+        description="سر يتحقق منه عبر ترويسة X-Telegram-Bot-Api-Secret-Token"
+    )
+
+    # ─── Meta / WhatsApp webhook signature ────────────────────────────────────
+    WHATSAPP_APP_SECRET: str = Field(
+        default="",
+        description="App Secret من Meta للتحقق من توقيع X-Hub-Signature-256"
+    )
+
     # ─── Optional: Meta Ads webhook secret ───────────────────────────────────
     META_ADS_VERIFY_TOKEN: str = Field(
         default="smartfield_meta_2024",
@@ -171,6 +195,10 @@ class Settings(BaseSettings):
     @property
     def whatsapp_api_url(self) -> str:
         return f"https://graph.facebook.com/v18.0/{self.WHATSAPP_PHONE_ID}/messages"
+
+    def cors_origins_list(self) -> list[str]:
+        """النطاقات المسموح بها كقائمة. فارغة ⇒ لا يُسمح بأي أصل خارجي."""
+        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
 
     def is_serpapi_configured(self) -> bool:
         return bool(self.SERPAPI_KEY)
