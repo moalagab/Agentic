@@ -71,7 +71,14 @@ CREATE TABLE IF NOT EXISTS leads (
   completed_trips             INTEGER        DEFAULT 0,
   contract_offered            BOOLEAN        DEFAULT FALSE,
   contract_status             VARCHAR(20),
-  approval_status             VARCHAR(20)    DEFAULT 'PENDING'
+  approval_status             VARCHAR(20)    DEFAULT 'PENDING',
+
+  -- ICP: تُحسَب في التنقيب عبر processors/icp_engine.py
+  -- premium_fb | fresh_food | horeca | meal_subscription | not_icp
+  -- (pharma_beauty مستبعدة قانونيًا — لا ترخيص ناقل SFDA)
+  icp_score                   INTEGER        DEFAULT 0,
+  icp_segment                 VARCHAR(32),
+  buying_signals              JSONB          DEFAULT '[]'::jsonb
 );
 CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
 CREATE INDEX IF NOT EXISTS idx_leads_deal_stage ON leads(deal_stage);
@@ -79,6 +86,8 @@ CREATE INDEX IF NOT EXISTS idx_leads_priority ON leads(priority);
 CREATE INDEX IF NOT EXISTS idx_leads_phone ON leads(phone);
 CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
 CREATE INDEX IF NOT EXISTS idx_leads_created_at ON leads(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_leads_icp_segment ON leads(icp_segment);
+CREATE INDEX IF NOT EXISTS idx_leads_icp_score   ON leads(icp_score DESC);
 ALTER TABLE leads ENABLE ROW LEVEL SECURITY;
 -- No UNIQUE constraint on phone today — this is why serpapi_prospecting has
 -- re-inserted the same ~330 real phone numbers up to 15x each (1,931 of
