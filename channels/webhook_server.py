@@ -484,7 +484,7 @@ async def submit_lead_api(
 
 
 @app.get("/api/lead/{lead_id}", tags=["Leads"])
-async def get_lead_status(lead_id: str) -> dict:
+async def get_lead_status(lead_id: str, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Retrieve the processing status of a previously submitted lead.
     استرداد حالة معالجة عميل تم إرساله مسبقاً.
@@ -661,6 +661,7 @@ class ProposalRequest(BaseModel):
 async def generate_proposal(
     req: ProposalRequest,
     settings: Settings = Depends(get_settings_dep),
+    _admin: None = Depends(require_admin_key),
 ) -> dict:
     """
     Generate a proposal draft and send to owner for Telegram approval.
@@ -701,7 +702,7 @@ class BookingRequest(BaseModel):
 
 
 @app.post("/api/book-meeting", tags=["Sales"])
-async def book_meeting(req: BookingRequest) -> dict:
+async def book_meeting(req: BookingRequest, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Initiate meeting booking for a lead via WhatsApp.
     يبدأ عملية حجز اجتماع للعميل عبر واتساب.
@@ -713,7 +714,7 @@ async def book_meeting(req: BookingRequest) -> dict:
 
 
 @app.post("/api/lead/{lead_id}/responded", tags=["Leads"])
-async def mark_lead_responded(lead_id: str) -> dict:
+async def mark_lead_responded(lead_id: str, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Mark a lead as responded (resets SLA timer).
     يُعلّم العميل باعتباره تم التواصل معه — يوقف مؤقت SLA.
@@ -735,7 +736,7 @@ async def get_sla_stats(_admin: None = Depends(require_admin_key)) -> dict:
 
 
 @app.post("/api/lead/{lead_id}/stage", tags=["Leads"])
-async def update_lead_stage(lead_id: str, body: dict) -> dict:
+async def update_lead_stage(lead_id: str, body: dict, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Move a lead to a new deal pipeline stage.
     ينقل العميل إلى مرحلة جديدة في خط الصفقات.
@@ -783,7 +784,7 @@ class CPQRequest(BaseModel):
 
 
 @app.post("/api/cpq/quote", tags=["CPQ"])
-async def generate_cpq_quote(req: CPQRequest) -> dict:
+async def generate_cpq_quote(req: CPQRequest, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Generate an instant CPQ quote for a transport request.
     توليد عرض سعر فوري ودقيق.
@@ -823,7 +824,7 @@ class ContentRequest(BaseModel):
 
 
 @app.post("/api/content/generate", tags=["Content"])
-async def generate_content(req: ContentRequest) -> dict:
+async def generate_content(req: ContentRequest, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Generate marketing content mapped to revenue impact.
     توليد محتوى تسويقي مرتبط بأهداف الإيراد.
@@ -904,7 +905,7 @@ async def generate_social_content(settings: Settings = Depends(get_settings_dep)
 
 
 @app.post("/api/content/objection", tags=["Content"])
-async def handle_objection(body: dict) -> dict:
+async def handle_objection(body: dict, _admin: None = Depends(require_admin_key)) -> dict:
     """Generate a sales script for handling a specific objection."""
     if not _content_engine:
         raise HTTPException(status_code=503, detail="Content engine not initialized")
@@ -1042,7 +1043,7 @@ class ICPScoreRequest(BaseModel):
 
 
 @app.post("/api/icp/score", tags=["Revenue"])
-async def score_lead_icp_endpoint(req: ICPScoreRequest) -> dict:
+async def score_lead_icp_endpoint(req: ICPScoreRequest, _admin: None = Depends(require_admin_key)) -> dict:
     """
     Score a lead against the 4 ICP profiles.
     يقيّم العميل على 4 شرائح ICP.
@@ -1082,7 +1083,7 @@ class RAGRequest(BaseModel):
 
 
 @app.post("/api/knowledge/ask", tags=["Knowledge Base"])
-async def knowledge_ask(req: RAGRequest, settings: Settings = Depends(get_settings_dep)) -> dict:
+async def knowledge_ask(req: RAGRequest, settings: Settings = Depends(get_settings_dep), _admin: None = Depends(require_admin_key)) -> dict:
     """
     Ask the knowledge base a question using RAG.
     يجيب على أسئلة الخدمات والأسعار من قاعدة المعرفة.
