@@ -1,0 +1,23 @@
+# الحد الأدنى لتشغيل الاختبارات — ليس requirements.txt كاملًا.
+#
+# الاختبارات نفسها لا تلمس الشبكة، لكن استيراد أي وحدة من processors
+# يجرّ سلسلة التبعيات كاملة: processors/__init__.py يستورد
+# LeadClassifier الذي يستورد structlog، وهكذا.
+#
+# هذه القائمة استُنتجت تجريبيًا في بيئة نظيفة (لا تُخمَّن): أُضيفت
+# الحزم واحدةً واحدةً حتى اختفى آخر ModuleNotFoundError. تجنّبنا
+# requirements.txt كاملًا لأن فيه weasyprint التي تحتاج مكتبات نظام
+# (cairo/pango) — تثبيتها في CI بطيء وهشّ بلا فائدة للاختبارات.
+#
+# الإصدارات مثبّتة على نفس قيم requirements.txt حتى لا يختبر CI
+# إصدارات غير التي تعمل في الإنتاج.
+
+pytest==8.4.2
+
+structlog==25.5.0
+pydantic==2.13.4
+pydantic-settings==2.14.1
+python-dotenv==1.2.2
+httpx==0.28.1
+APScheduler==3.11.2
+supabase==2.30.1
