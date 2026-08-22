@@ -64,6 +64,11 @@ from processors.ab_test_engine import ABTestEngine
 from dashboard.revenue_dashboard import get_dashboard_data, render_dashboard_html
 from dashboard.leads_admin import render_leads_admin
 
+# الخدمة تشغّل هذه الوحدة مباشرةً عبر uvicorn، فلا يُنفَّذ main.py ولا
+# إعداد التسجيل الذي فيه. نحقن محو الأسرار هنا قبل أي تسجيل.
+import logging_redaction as _redaction
+_redaction.install()
+
 logger = structlog.get_logger(__name__)
 
 # ── Application state (initialized in lifespan) ────────────────────────────────
