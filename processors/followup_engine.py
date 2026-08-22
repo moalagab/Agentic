@@ -453,6 +453,18 @@ class CreativeFollowupEngine:
 
         leads = await self._fetch_followup_candidates()
         for lead in leads:
+            # تجاهل السجلات ذات الأرقام الفاسدة (مجموعات واتساب، بثوث
+            # الحالة، معرّفات LID). توليد بطاقة موافقة لها يستهلك مراجعة
+            # بشرية لرسالة يستحيل إرسالها أصلًا.
+            if not _normalize_wa_phone(lead.get("phone", "")):
+                self._log.debug(
+                    "creative_followup.skip_invalid_phone",
+                    raw=str(lead.get("phone"))[:30],
+                    lead_id=lead.get("id"),
+                )
+                results["skipped_invalid_phone"] = results.get("skipped_invalid_phone", 0) + 1
+                continue
+
             count = int(lead.get("followup_count") or 0)
             if count >= self.MAX_ATTEMPTS:
                 await self._mark_lost(lead)
