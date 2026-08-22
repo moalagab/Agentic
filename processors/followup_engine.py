@@ -422,6 +422,11 @@ class CreativeFollowupEngine:
 
     MAX_ATTEMPTS = 3
 
+    # أقصى عدد بطاقات موافقة تُرسَل في الدورة الواحدة. بدون هذا السقف كانت
+    # أول دورة بعد رفع الانسداد سترسل بطاقة لكل عميل مؤهَّل دفعةً واحدة
+    # (336 عميلًا حاليًا) — إغراق لتيليجرام يجعل المراجعة البشرية مستحيلة.
+    MAX_CARDS_PER_RUN = 10
+
     def __init__(
         self,
         crm: Any,
@@ -458,6 +463,13 @@ class CreativeFollowupEngine:
                 if ok:
                     _queue_followup_card(lead["id"])   # سجّل البطاقة كـ pending
                     results["approval_cards_sent"] += 1
+                    if results["approval_cards_sent"] >= self.MAX_CARDS_PER_RUN:
+                        self._log.info(
+                            "creative_followup.batch_cap_reached",
+                            sent=results["approval_cards_sent"],
+                            remaining_candidates=len(leads) - leads.index(lead) - 1,
+                        )
+                        break
         return results
 
     def _is_due(self, lead: dict, attempt: int) -> bool:
