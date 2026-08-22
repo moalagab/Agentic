@@ -21,20 +21,75 @@ logger = logging.getLogger(__name__)
 SERPAPI_URL = "https://serpapi.com/search"
 
 # مجموعة استعلامات مختلفة عن Outscraper لتنويع النتائج
-SERPAPI_QUERIES = [
-    "صيدلية الرياض",
-    "مستشفى خاص الرياض",
+# ═══════════════════════════════════════════════════════════════════════
+# استعلامات التنقيب — مرتّبة حسب أولوية العميل المستهدف
+# ═══════════════════════════════════════════════════════════════════════
+# تنبيه: التشغيل يأخذ أول `max_queries` فقط (4 يوميًا)، فترتيب هذه
+# القائمة هو ما يُنقَّب عنه فعليًا لا مجرد تفضيل.
+#
+# القائمة السابقة كانت تبدأ بـ "صيدلية الرياض" و"مستشفى خاص الرياض"،
+# أي أن نصف الميزانية اليومية كان يذهب إلى شريحة يستبعدها المصنّف
+# **قانونيًا** (لا ترخيص ناقل من الهيئة العامة للغذاء والدواء)، ولم يكن
+# فيها استعلام واحد لمقدّمي الوجبات الصحية والاشتراكات — وهو ما يفسّر
+# وجود عميلين اثنين فقط في شريحة meal_subscription من أصل 337.
+
+# الشريحة الأولى: مقدّمو الوجبات الصحية والاشتراكات الشهرية (Meal Run)
+PRIMARY_QUERIES = [
+    "اشتراك وجبات صحية الرياض",
+    "مطعم صحي دايت الرياض",
+    "توصيل وجبات دايت الرياض",
+    "فيت فود الرياض",
+    "مطبخ دايت اشتراكات الرياض",
+    "وجبات كيتو الرياض",
+    "نظام غذائي اشتراك شهري الرياض",
+    "مطعم وجبات صحية للشركات الرياض",
+]
+
+# الشرائح التالية: تُنقَّب بالتناوب بعد تغطية الشريحة الأولى
+SECONDARY_QUERIES = [
     "محل لحوم فاخرة الرياض",
     "مطعم فندقي الرياض",
     "موزع أغذية الرياض",
     "شركة تموين الرياض",
     "مخزن تبريد الرياض",
-    "مطعم سلسلة الرياض",
     "مورد خضار وفواكه الرياض",
     "كيتيرينج شركات الرياض",
+    "محمصة قهوة الرياض",
+    "متجر شوكولاتة الرياض",
+    "مخبز وحلويات الرياض",
     "محل بقالة فاخرة الرياض",
-    "عيادة تجميل الرياض",
+    "مطعم سلسلة الرياض",
 ]
+
+# ملغاة نهائيًا: صيدليات ومستشفيات وعيادات تجميل. الاستبعاد قانوني
+# لا تفضيلي، فإبقاؤها في القائمة يهدر الميزانية على عملاء لا يمكن
+# التعاقد معهم أصلًا.
+
+SERPAPI_QUERIES = PRIMARY_QUERIES + SECONDARY_QUERIES
+
+
+def select_queries(max_queries: int = 4, rotation: int = 0) -> list[str]:
+    """
+    اختر استعلامات الدورة: الشريحة الأولى تأخذ النصيب الأكبر دائمًا،
+    والباقي يتناوب حتى لا تُهمَل الشرائح الأخرى.
+
+    مع max_queries=4: ثلاثة استعلامات للوجبات الصحية + واحد متناوب.
+    الاعتماد على SERPAPI_QUERIES[:4] وحده كان يعني تنقيبًا في نفس
+    الأربعة كل يوم إلى الأبد.
+    """
+    if max_queries <= 0:
+        return []
+    n_primary = max(1, round(max_queries * 0.75))
+    n_secondary = max_queries - n_primary
+
+    def _rotate(pool: list[str], count: int, step: int) -> list[str]:
+        if not pool or count <= 0:
+            return []
+        start = (step * count) % len(pool)
+        return [pool[(start + i) % len(pool)] for i in range(min(count, len(pool)))]
+
+    return _rotate(PRIMARY_QUERIES, n_primary, rotation) + \
+           _rotate(SECONDARY_QUERIES, n_secondary, rotation)
 
 
 # Riyadh city center coordinates — zoom 12 covers ~40km radius
@@ -128,7 +183,9 @@ async def run_serpapi_prospecting(
 
     import asyncio
 
-    queries = SERPAPI_QUERIES[:max_queries]
+    # التناوب مشتق من رقم اليوم — يغطّي القائمة عبر الأيام بلا حالة مخزَّنة
+    from datetime import date as _date
+    queries = select_queries(max_queries, rotation=_date.today().toordinal())
     all_places: list[dict] = []
 
     # 1. Fetch all queries concurrently

@@ -509,7 +509,17 @@ class CreativeFollowupEngine:
                     .neq("phone", "")
                     .execute()
             )
-            return [r for r in (result.data or []) if int(r.get("followup_count") or 0) <= self.MAX_ATTEMPTS]
+            rows = [r for r in (result.data or []) if int(r.get("followup_count") or 0) <= self.MAX_ATTEMPTS]
+            # رتّب بأولوية الشريحة: السقف 10 بطاقات لكل دورة يعني أن
+            # الترتيب هو ما يقرّر *من* يُتواصَل معه فعلًا. بلا ترتيب كان
+            # الاختيار يتبع ترتيب قاعدة البيانات الاعتباطي، فيقف عميل
+            # Meal Run خلف 300 عميل آخر بلا سبب.
+            try:
+                from processors.icp_engine import lead_priority_key
+                rows.sort(key=lead_priority_key)
+            except Exception:
+                pass
+            return rows
         except Exception as exc:
             self._log.error("followup.fetch_failed", error=str(exc))
             return []

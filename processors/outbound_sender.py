@@ -237,8 +237,23 @@ class OutboundSender:
 
     # ── Supabase helpers ───────────────────────────────────────────────────────
 
+
+    # نافذة الجلب قبل الترتيب. PostgREST لا يدعم ترتيبًا بأولوية مخصّصة،
+    # فنجلب نافذة أوسع ونرتّبها في بايثون ثم نقصّها.
+    _PRIORITY_WINDOW = 200
+
+    @staticmethod
+    def _sort_by_priority(rows: list[dict], limit: int) -> list[dict]:
+        """رتّب بأولوية الشريحة ثم قوّة المطابقة، وقصّ إلى الحد المطلوب."""
+        try:
+            from processors.icp_engine import lead_priority_key
+            rows = sorted(rows, key=lead_priority_key)
+        except Exception:
+            pass
+        return rows[:limit]
+
     async def _fetch_pending(self, limit: int) -> list[dict]:
-        """Fetch leads with approval_status=PENDING, phone set, status=new."""
+        """يُعيد العملاء المرشّحين مرتّبين بأولوية الشريحة (Meal Run أولًا)."""
         loop = asyncio.get_running_loop()
         try:
             result = await loop.run_in_executor(
@@ -249,11 +264,14 @@ class OutboundSender:
                     .not_.is_("phone", "null")
                     .neq("phone", "")
                     .eq("status", "new")
-                    .order("score", desc=True)
-                    .limit(limit)
+                    # نافذة أوسع من المطلوب ثم ترتيب بالشريحة في بايثون:
+                    # PostgREST لا يرتّب بأولوية مخصّصة، والاكتفاء بـ
+                    # order(score) كان يُخرج عملاء Meal Run من النافذة.
+                    .order("icp_score", desc=True)
+                    .limit(max(limit, self._PRIORITY_WINDOW))
                     .execute()
             )
-            return result.data or []
+            return self._sort_by_priority(result.data or [], limit)
         except Exception:
             # Fallback: approval_status column may not exist yet
             try:
@@ -265,10 +283,10 @@ class OutboundSender:
                         .neq("phone", "")
                         .eq("status", "new")
                         .order("score", desc=True)
-                        .limit(limit)
+                        .limit(max(limit, self._PRIORITY_WINDOW))
                         .execute()
                 )
-                return result.data or []
+                return self._sort_by_priority(result.data or [], limit)
             except Exception as exc:
                 self._log.error("outbound.fetch_failed", error=str(exc))
                 return []

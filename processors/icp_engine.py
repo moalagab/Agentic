@@ -261,3 +261,39 @@ def enrich_lead_with_icp(lead: Lead) -> Lead:
     lead.buying_signals = signals
     lead.update_timestamp()
     return lead
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# أولوية التواصل بين الشرائح
+# ═══════════════════════════════════════════════════════════════════════
+# قرار تجاري (2026-08-22): مقدّمو الوجبات الصحية والاشتراكات الشهرية هم
+# العميل المستهدف الأول، ثم تأتي بقية الشرائح.
+#
+# لا يكفي أن يصنّف المحرّك الشريحة صحيحًا — لا بد أن يرتّب التواصل بها
+# أيضًا. كان الإرسال يرتّب بـ score العام (تقييم Gemini) والمتابعة بلا
+# ترتيب إطلاقًا، فكان عميل Meal Run يقف في الطابور خلف أي مخبز أعلى
+# تقييمًا على الخرائط.
+ICP_PRIORITY: dict[str, int] = {
+    ICPSegment.MEAL_SUBSCRIPTION.value: 0,   # الشريحة الأولى
+    ICPSegment.PREMIUM_FB.value:        1,
+    ICPSegment.HORECA.value:            2,
+    ICPSegment.FRESH_FOOD.value:        3,
+    ICPSegment.NOT_ICP.value:           9,   # آخر الطابور
+}
+
+_UNKNOWN_PRIORITY = 5   # عميل بلا تصنيف: بعد الشرائح المعروفة، قبل not_icp
+
+
+def lead_priority_key(lead: dict) -> tuple[int, int, int]:
+    """
+    مفتاح ترتيب العملاء للتواصل: الشريحة أولًا، ثم قوة المطابقة.
+
+    يُستخدم في محرّكي الإرسال والمتابعة معًا حتى لا تتفرّق الأولوية
+    بينهما.
+    """
+    segment = str(lead.get("icp_segment") or "")
+    return (
+        ICP_PRIORITY.get(segment, _UNKNOWN_PRIORITY),
+        -int(lead.get("icp_score") or 0),
+        -int(lead.get("score") or 0),
+    )
