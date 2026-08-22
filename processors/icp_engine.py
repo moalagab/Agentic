@@ -13,124 +13,125 @@ from typing import Any
 from models.lead import BuyingSignal, ICPSegment, Lead, LeadCategory
 
 
-# Keywords per segment
-_PREMIUM_FB_KEYWORDS = [
-    "شوكولاتة", "chocolate", "كافيه", "cafe", "coffee", "قهوة",
-    "specialty", "سبيشلتي", "cloud kitchen", "مطبخ سحابي",
-    "catering", "كيتيرينج", "confectionery", "patisserie", "بيتسري",
-    "حلويات فاخرة", "gourmet", "artisan", "premium", "فاخر",
-    "dessert", "ice cream", "ايس كريم",
+# ═══════════════════════════════════════════════════════════════════════
+# تطبيع النص العربي قبل المطابقة
+# ═══════════════════════════════════════════════════════════════════════
+# بدونه تفشل مطابقات حقيقية بفروق إملائية لا دلالة لها: "مورّد" بالشدّة
+# لا تطابق "مورد" (9+8 عملاء)، و"أغذية" بالهمزة لا تطابق "اغذية".
+_AR_DIACRITICS = re.compile(r"[\u064B-\u0652\u0640]")
+
+
+def _normalize_ar(text: str) -> str:
+    """وحّد الشكل الإملائي: حذف التشكيل والتطويل، وتوحيد الألف والياء والتاء."""
+    t = _AR_DIACRITICS.sub("", str(text or "").lower())
+    for src, dst in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+        t = t.replace(src, dst)
+    return t
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# استبعاد: منشآت ليست أغذية أصلًا
+# ═══════════════════════════════════════════════════════════════════════
+# موردو معدات المطابخ ومجدّدوها ظهروا في البيانات (~15 عميلًا) وكانوا
+# يُصنَّفون HoReCa لأن أسماءهم تحوي "مطاعم"/"مطابخ". لا ينقلون شيئًا
+# مبرَّدًا — استبعادهم أدقّ من ترتيبهم في ذيل القائمة.
+_EXCLUDE_KEYWORDS = [
+    "مستلزمات مطابخ", "مستلزمات المطابخ", "مستلزمات المطاعم",
+    "مجدد مطابخ", "معدات مطابخ", "معدات المطاعم", "دواليب",
+    "اثاث", "تجهيزات محلات",
 ]
 
-_PHARMA_BEAUTY_KEYWORDS = [
-    "صيدلية", "pharmacy", "pharma", "دواء", "أدوية", "medicine",
-    "مستشفى", "hospital", "clinic", "عيادة", "lab", "مختبر",
-    "cosmetics", "مستحضرات", "beauty", "جمال", "skincare",
-    "supplement", "مكملات", "medical", "طبي", "healthcare",
-    "vaccine", "لقاح", "biologics",
+# ═══════════════════════════════════════════════════════════════════════
+# كلمات الشرائح — مبنية على المفردات الفعلية في البيانات (165 تصنيفًا)
+# ═══════════════════════════════════════════════════════════════════════
+_PREMIUM_FB_KEYWORDS = [
+    # مخابز وحلويات — أكبر مجموعة فعلية في البيانات
+    "مخبز", "مخابز", "bakery", "معجنات", "حلويات", "حلا", "كيك", "cake",
+    "patisserie", "بيتسري", "باتيسري", "confectionery",
+    # شوكولاتة — بصيغتيها الشائعتين
+    "شوكولاته", "شيكولاته", "chocolate",
+    # قهوة ومحامص
+    "محمصه", "محامص", "قهوه", "coffee", "كافيه", "cafe", "café", "مقهي",
+    "specialty", "سبيشلتي", "roastery",
+    # تمور — فئة فاخرة قائمة بذاتها في السوق السعودي
+    "تمور", "تمر", "dates",
+    # مطابخ سحابية ومركزية
+    "مطبخ سحابي", "مطبخ مركزي", "cloud kitchen",
+    # مثلجات
+    "ايس كريم", "ice cream", "جيلاتو", "gelato", "بوظه", "dessert",
+    # واصفات الفخامة
+    "فاخر", "فاخره", "راقي", "gourmet", "artisan", "premium",
 ]
 
 _FRESH_FOOD_KEYWORDS = [
-    "عضوي", "organic", "طازج", "fresh", "لحوم", "meat", "دجاج", "chicken",
-    "seafood", "مأكولات بحرية", "سمك", "fish", "خضار", "vegetables",
-    "fruits", "فواكه", "meal prep", "وجبات", "meal kit",
-    "subscription", "اشتراك", "توصيل", "delivery", "بقالة", "grocery",
-    "produce", "dairy", "ألبان",
+    "عضوي", "organic", "طازج", "fresh", "لحوم", "لحم", "meat",
+    "دجاج", "chicken", "مأكولات بحريه", "بحريه", "seafood", "سمك", "fish",
+    "خضار", "خضروات", "vegetables", "فواكه", "فاكهه", "fruits",
+    "فواكه مجففه", "بقاله", "سوبرماركت", "supermarket", "grocery",
+    "البان", "dairy", "اجبان", "مزرعه", "farm",
+    "مواد غذائيه", "منتجات غذائيه", "اغذيه طبيعيه",
 ]
 
-# Meal subscription / healthy-meal businesses — added 2026-08-04 as an
-# officially approved B2B segment (Meal Run service). Customer type is
-# BROADER than "subscription company": healthy restaurants (مطاعم صحية) and
-# any healthy-meal/diet service provider, as long as they have more than one
-# subscriber of their own — the contract and billing stay with that business
-# only, subscriber homes are just route stops within that one contract,
-# never a direct consumer contract. More specific than _FRESH_FOOD_KEYWORDS
-# on purpose so a genuine healthy-restaurant/diet brand scores here instead
-# of the generic fresh-food or HoReCa bucket.
+# Meal Run — مطاعم صحية ومزوّدو وجبات دايت لديهم مشتركون.
+# العقد والفوترة مع المنشأة وحدها؛ بيوت المشتركين محطات على خط واحد.
 _MEAL_SUBSCRIPTION_KEYWORDS = [
-    "دايت", "diet", "اشتراك وجبات", "meal subscription", "meal plan",
-    "خطة غذائية", "خطة أكل", "سعرات", "calorie", "كيتو", "keto",
-    "لوكارب", "low carb", "فيت فود", "fit food", "fitness meals",
-    "healthy meals", "وجبات صحية", "meal delivery", "توصيل وجبات",
-    "نظام غذائي", "تخسيس", "weight loss meals", "clean eating",
-    "مطعم صحي", "healthy restaurant", "مطعم دايت", "diet restaurant",
-    "مشتركين", "subscribers", "اشتراكات", "subscriptions",
+    "دايت", "diet", "اشتراك وجبات", "اشتراكات", "مشتركين", "subscribers",
+    "meal subscription", "meal plan", "meal prep", "خطه غذائيه", "نظام غذائي",
+    "سعرات", "calorie", "كيتو", "keto", "لوكارب", "low carb",
+    "فيت فود", "fit food", "fitness meals", "healthy meals",
+    "وجبات صحيه", "مأكولات صحيه", "مطعم صحي", "صحيه", "healthy",
+    "تخسيس", "weight loss", "clean eating", "توصيل وجبات", "meal delivery",
 ]
 
 _HORECA_KEYWORDS = [
-    "فندق", "hotel", "مطعم", "restaurant", "مقهى", "café",
-    "catering supplier", "distributor", "موزع", "supplier", "مورد",
-    "hospitality", "ضيافة", "resort", "منتجع", "banquet", "بنكيت",
-    "food service", "canteen", "كانتين",
+    "فندق", "hotel", "منتجع", "resort", "ضيافه", "hospitality",
+    "مطعم", "مطاعم", "restaurant",
+    # التوريد والتموين — ظهرت بكثرة في البيانات ولم تكن مغطاة
+    "مورد", "موردين", "توريد", "تموين", "متعهد", "catering",
+    "supplier", "distributor", "موزع", "banquet", "حفلات",
+    "food service", "كانتين", "بوفيه",
+]
+
+# محفوظة للتوثيق فقط — الشريحة مستبعدة قانونيًا ولا تدخل التقييم
+_PHARMA_BEAUTY_KEYWORDS = [
+    "صيدليه", "pharmacy", "pharma", "دواء", "ادويه", "medicine",
+    "مستشفي", "hospital", "clinic", "عياده", "مختبر",
+    "cosmetics", "مستحضرات", "skincare", "مكملات", "طبي", "vaccine",
 ]
 
 
 def _text_hits(text: str, keywords: list[str]) -> int:
-    text_lower = text.lower()
-    return sum(1 for kw in keywords if kw.lower() in text_lower)
+    """عدد الكلمات المفتاحية الموجودة في النص، بعد تطبيع الطرفين."""
+    t = _normalize_ar(text)
+    return sum(1 for k in keywords if _normalize_ar(k) in t)
 
 
-def _score_premium_fb(text: str, rating: float, review_count: int) -> int:
-    score = 0
-    hits = _text_hits(text, _PREMIUM_FB_KEYWORDS)
-    score += min(hits * 15, 45)
+def _is_excluded(text: str) -> bool:
+    """True إذا كانت المنشأة خارج نطاق نقل الأغذية أصلًا."""
+    return _text_hits(text, _EXCLUDE_KEYWORDS) > 0
+
+
+def _quality_bonus(rating: float, review_count: int) -> int:
+    """
+    مكافأة الجودة — تُطبَّق **بعد** اختيار الشريحة وبالتساوي عليها جميعًا.
+
+    التصميم السابق كان يمنح كل شريحة مكافآت مختلفة (ونقاط أساس لـ
+    premium_fb وحدها)، فصارت الجودة تُقرِّر *أي* شريحة يقع فيها العميل
+    لا *مدى* جودته داخلها. النتيجة: 56% من العملاء صُنِّفوا premium_fb
+    بلا أي كلمة مطابقة، لمجرد أن تقييمهم على الخرائط مرتفع.
+    """
+    bonus = 0
     if rating >= 4.5:
-        score += 20
+        bonus += 25
     elif rating >= 4.0:
-        score += 10
+        bonus += 15
+    elif rating >= 3.5:
+        bonus += 5
     if review_count >= 100:
-        score += 15
+        bonus += 15
     elif review_count >= 30:
-        score += 8
-    score += 20  # base: F&B is our primary target
-    return min(score, 100)
-
-
-def _score_fresh_food(text: str, rating: float) -> int:
-    score = 0
-    hits = _text_hits(text, _FRESH_FOOD_KEYWORDS)
-    score += min(hits * 15, 60)
-    if rating >= 4.0:
-        score += 15
-    return min(score, 100)
-
-
-def _score_horeca(text: str, review_count: int) -> int:
-    score = 0
-    hits = _text_hits(text, _HORECA_KEYWORDS)
-    score += min(hits * 15, 60)
-    if review_count >= 50:
-        score += 20
-    elif review_count >= 20:
-        score += 10
-    return min(score, 100)
-
-
-def _score_meal_subscription(text: str, rating: float, review_count: int) -> int:
-    """
-    Meal Run — healthy restaurants and meal/diet-subscription service
-    providers, officially approved 2026-08-04 as a B2B segment. Customer
-    type is any such BUSINESS with more than one subscriber of its own
-    (restaurant or dedicated subscription brand — not narrower than that);
-    the contract and billing stay with that business, subscriber homes are
-    only stops on its route, never a direct consumer contract (see
-    company-profile.md in the vault). review_count/rating stand in for an
-    established subscriber base — subscriber count and geographic clustering
-    are what actually decide whether a specific deal is viable, and that
-    still has to be asked directly; this score is a first-pass filter, not a
-    substitute for it.
-    """
-    score = 0
-    hits = _text_hits(text, _MEAL_SUBSCRIPTION_KEYWORDS)
-    score += min(hits * 20, 60)
-    if review_count >= 200:
-        score += 20
-    elif review_count >= 50:
-        score += 10
-    if rating >= 4.0:
-        score += 10
-    score += 10  # base: officially approved B2B segment
-    return min(score, 100)
+        bonus += 8
+    return bonus
 
 
 def detect_buying_signals(lead: Lead) -> list[str]:
@@ -170,10 +171,27 @@ def detect_buying_signals(lead: Lead) -> list[str]:
     return list(set(signals))
 
 
+# الحد الأدنى لاعتبار العميل ضمن الـ ICP. مطابقة كلمة واحدة (20 نقطة)
+# بلا أي إشارة جودة لا تكفي — العتبة تتطلب إمّا مطابقتين، أو مطابقة
+# واحدة مع تقييم/مراجعات معقولة.
+_MIN_ICP_SCORE = 30
+
+
 def score_lead_icp(lead: Lead) -> tuple[int, str]:
     """
-    Returns (icp_score 0-100, icp_segment string).
-    Evaluates against all 4 ICP profiles and picks the best match.
+    أعد (icp_score 0-100، اسم الشريحة).
+
+    المبدأ: **الكلمات المفتاحية وحدها تحدّد الشريحة**، والجودة (التقييم
+    وعدد المراجعات) تعدّل النتيجة *داخل* الشريحة المختارة.
+
+    التصميم السابق خلط الأمرين: كانت premium_fb تحصل على +20 نقطة أساس
+    لا تحصل عليها أي شريحة أخرى، وكل شريحة لها مكافآت جودة مختلفة. ولأن
+    الاختيار max(scores)، كان أي مطعم أو فندق بتقييم مرتفع يقع في
+    premium_fb افتراضيًا — 56% من العملاء صُنِّفوا هناك بلا كلمة واحدة
+    مطابقة، فصارت الشريحة سلّة افتراضية لا تصنيفًا.
+
+    عميل لا تطابقه أي كلمة في أي شريحة يُعاد كـ not_icp: "لا نعرف" أصدق
+    من نسبته لشريحة بعينها.
     """
     raw = lead.raw_data or {}
     rating = float(raw.get("rating") or raw.get("google_rating") or 0)
@@ -186,27 +204,45 @@ def score_lead_icp(lead: Lead) -> tuple[int, str]:
         raw.get("business_type") or "",
         raw.get("description") or "",
         raw.get("gemini_category") or "",
-        category,
+        str(category),
     ])
 
-    # pharma_beauty is not an active ICP segment for Smart Field (confirmed
-    # 2026-08-09) — excluded from scoring entirely: not just deprioritized,
-    # legally prohibited (no SFDA carrier license). meal_subscription added
-    # 2026-08-09 as the officially approved Meal Run segment.
-    scores = {
-        ICPSegment.PREMIUM_FB:        _score_premium_fb(search_text, rating, review_count),
-        ICPSegment.FRESH_FOOD:        _score_fresh_food(search_text, rating),
-        ICPSegment.HORECA:            _score_horeca(search_text, review_count),
-        ICPSegment.MEAL_SUBSCRIPTION: _score_meal_subscription(search_text, rating, review_count),
+    # منشآت خارج نطاق نقل الأغذية (معدات مطابخ، تجهيزات محلات)
+    if _is_excluded(search_text):
+        return (0, ICPSegment.NOT_ICP.value)
+
+    # pharma_beauty مستبعدة تمامًا (2026-08-09): ليست أولوية منخفضة بل
+    # منع قانوني — لا ترخيص ناقل من الهيئة العامة للغذاء والدواء.
+    affinity = {
+        ICPSegment.MEAL_SUBSCRIPTION: _text_hits(search_text, _MEAL_SUBSCRIPTION_KEYWORDS),
+        ICPSegment.PREMIUM_FB:        _text_hits(search_text, _PREMIUM_FB_KEYWORDS),
+        ICPSegment.HORECA:            _text_hits(search_text, _HORECA_KEYWORDS),
+        ICPSegment.FRESH_FOOD:        _text_hits(search_text, _FRESH_FOOD_KEYWORDS),
     }
 
-    best_segment = max(scores, key=lambda s: scores[s])
-    best_score = scores[best_segment]
+    # ترتيب dict مضمون في بايثون 3.7+، وmax يُعيد أول أعلى قيمة — لذا
+    # ترتيب المفاتيح أعلاه هو كاسر التعادل، مرتّبًا من الأضيق تعريفًا
+    # إلى الأوسع:
+    #   meal_subscription — نموذج عمل محدّد (مطعم صحي باشتراكات لا يقع
+    #                        في horeca العامة)
+    #   premium_fb        — فئات منتجات محدّدة (مخبز، محمصة، تمور)
+    #   horeca            — نوع المنشأة (مطعم، فندق، مورّد، موزّع)
+    #   fresh_food        — طبيعة البضاعة، الأوسع
+    # لذلك "مورّد منتجات غذائية" يقع في horeca (موزّع) لا fresh_food،
+    # و"مطعم مأكولات بحرية" يقع في horeca (مطعم) لا في بضاعته.
+    best_segment = max(affinity, key=lambda seg: affinity[seg])
+    hits = affinity[best_segment]
 
-    if best_score < 20:
-        return (best_score, ICPSegment.NOT_ICP.value)
+    if hits == 0:
+        return (0, ICPSegment.NOT_ICP.value)
 
-    return (best_score, best_segment.value)
+    keyword_score = min(hits * 20, 60)
+    score = min(keyword_score + _quality_bonus(rating, review_count), 100)
+
+    if score < _MIN_ICP_SCORE:
+        return (score, ICPSegment.NOT_ICP.value)
+
+    return (score, best_segment.value)
 
 
 def enrich_lead_with_icp(lead: Lead) -> Lead:
