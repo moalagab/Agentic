@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+import httpx
 import structlog
 
 from config import get_settings
@@ -66,6 +67,8 @@ class SmartfieldScheduler:
         contract_converter: "Optional[ContractConverter]" = None,
         waha_monitor: "Optional[WAHAMonitor]" = None,
         backup_engine: "Optional[BackupEngine]" = None,
+        *,
+        heartbeat_client: httpx.AsyncClient,
     ):
         self.employee = employee
         self.pipeline = pipeline
@@ -78,6 +81,10 @@ class SmartfieldScheduler:
         self.contract_converter = contract_converter
         self.waha_monitor = waha_monitor
         self.backup_engine = backup_engine
+        # عميل HTTP طويل العمر يملكه lifespan. النبضة كانت تنشئ عميلًا
+        # جديدًا كل 5 دقائق، وكل عميل يحمل SSLContext لا يُحرَّر إلا بجمع
+        # دوري لم يكن يعمل — فينمو RSS بلا حد.
+        self._heartbeat_client = heartbeat_client
         self.scheduler = AsyncIOScheduler(timezone=RIYADH_TZ)
         self._running = False
 
@@ -108,9 +115,7 @@ class SmartfieldScheduler:
         if not url:
             return
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=10) as client:
-                await client.get(url)
+            await self._heartbeat_client.get(url, timeout=10)
             logger.debug("scheduler.heartbeat_sent")
         except Exception as exc:
             # فشل النبضة ليس فشلًا في النظام — سجّله ولا توقف شيئًا

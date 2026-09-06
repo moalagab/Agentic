@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
+import httpx
 import structlog
 from fastapi import (
     BackgroundTasks,
@@ -120,6 +121,12 @@ async def lifespan(app: FastAPI):
 
     log = logger.bind(component="lifespan")
     log.info("Initializing Smartfield Lead Agent system")
+
+    # عميلا HTTP طويلا العمر تملكهما دورة حياة التطبيق ويُغلقان عند الإيقاف.
+    # قبل ذلك كان كل نداء دوري (كل 5 دقائق) ينشئ عميلًا جديدًا يحمل
+    # SSLContext، ولا يُحرَّر إلا بجمع دوري لم يكن يعمل فعليًا.
+    _waha_http_client: Optional[httpx.AsyncClient] = None
+    _heartbeat_http_client: Optional[httpx.AsyncClient] = None
 
     if not settings.ADMIN_API_KEY:
         log.warning(
@@ -235,59 +242,88 @@ async def lifespan(app: FastAPI):
         except Exception as exc:
             log.warning("RevOS v6 engines init partial", error=str(exc))
 
-    # Initialize WAHA monitor for permanent WhatsApp connection
-    _waha_monitor = WAHAMonitor(
-        waha_url=getattr(settings, "WAHA_URL", "http://localhost:3000"),
-        api_key=getattr(settings, "WAHA_API_KEY", ""),
-        session=getattr(settings, "WAHA_SESSION", "default"),
-        telegram=_tg_handler,
-        owner_chat_ids=_owner_ids,
-    )
+    # كل مورد يملكه lifespan ويحتاج إغلاقًا يقع داخل هذه الـ try: العميلان
+    # يُنشآن في أول سطرين منها، فأي فشل بعدهما وقبل yield يمرّ حتمًا بـ
+    # finally. قبل هذه النقطة لا يوجد مورد من هذا النوع.
+    try:
+        _waha_http_client = httpx.AsyncClient()
+        _heartbeat_http_client = httpx.AsyncClient()
 
-    # Initialize BackupEngine
-    if _pipeline and _pipeline.primary_crm:
-        try:
-            supabase_client = getattr(_pipeline.primary_crm, "client", None)
-            if supabase_client:
-                _backup_engine = BackupEngine(
-                    supabase_client=supabase_client,
-                    telegram=_tg_handler,
-                    owner_chat_ids=_owner_ids,
-                )
-                _ab_engine = ABTestEngine(supabase_client)
-                log.info("BackupEngine + ABTestEngine initialized")
-        except Exception as exc:
-            log.warning("BackupEngine init failed", error=str(exc))
+        # Initialize WAHA monitor for permanent WhatsApp connection
+        _waha_monitor = WAHAMonitor(
+            waha_url=getattr(settings, "WAHA_URL", "http://localhost:3000"),
+            api_key=getattr(settings, "WAHA_API_KEY", ""),
+            client=_waha_http_client,
+            session=getattr(settings, "WAHA_SESSION", "default"),
+            telegram=_tg_handler,
+            owner_chat_ids=_owner_ids,
+        )
 
-    # Start the autonomous scheduler (daily reports, follow-ups, etc.)
-    _scheduler = SmartfieldScheduler(
-        _employee,
-        pipeline=_pipeline,
-        sla_monitor=_sla_monitor,
-        cs_engine=_cs_engine,
-        learning_loop=_learning_loop,
-        content_engine=_content_engine,
-        outbound_sender=_outbound_sender,
-        creative_followup_engine=_creative_followup,
-        contract_converter=_contract_converter,
-        waha_monitor=_waha_monitor,
-        backup_engine=_backup_engine,
-    )
-    _scheduler.start()
+        # Initialize BackupEngine
+        if _pipeline and _pipeline.primary_crm:
+            try:
+                supabase_client = getattr(_pipeline.primary_crm, "client", None)
+                if supabase_client:
+                    _backup_engine = BackupEngine(
+                        supabase_client=supabase_client,
+                        telegram=_tg_handler,
+                        owner_chat_ids=_owner_ids,
+                    )
+                    _ab_engine = ABTestEngine(supabase_client)
+                    log.info("BackupEngine + ABTestEngine initialized")
+            except Exception as exc:
+                log.warning("BackupEngine init failed", error=str(exc))
 
-    log.info(
-        "System initialized",
-        primary_crm=settings.PRIMARY_CRM,
-        sales_team_count=len(settings.SALES_TEAM_WHATSAPP),
-        twilio_configured=settings.is_twilio_configured(),
-        autonomous_employee="active",
-    )
+        # Start the autonomous scheduler (daily reports, follow-ups, etc.)
+        _scheduler = SmartfieldScheduler(
+            _employee,
+            pipeline=_pipeline,
+            sla_monitor=_sla_monitor,
+            cs_engine=_cs_engine,
+            learning_loop=_learning_loop,
+            content_engine=_content_engine,
+            outbound_sender=_outbound_sender,
+            creative_followup_engine=_creative_followup,
+            contract_converter=_contract_converter,
+            waha_monitor=_waha_monitor,
+            backup_engine=_backup_engine,
+            heartbeat_client=_heartbeat_http_client,
+        )
+        _scheduler.start()
 
-    yield
+        log.info(
+            "System initialized",
+            primary_crm=settings.PRIMARY_CRM,
+            sales_team_count=len(settings.SALES_TEAM_WHATSAPP),
+            twilio_configured=settings.is_twilio_configured(),
+            autonomous_employee="active",
+        )
 
-    if _scheduler:
-        _scheduler.stop()
-    log.info("Shutting down Smartfield Lead Agent system")
+        yield
+    finally:
+        # stop() محروس بـ self._running داخليًا فلا يفعل شيئًا إن لم يكن
+        # الجدول قد أُقلع. لكن علَمنا ذاك مستقلّ عن حالة APScheduler نفسها:
+        # إن تباعدا، يرفع shutdown() الاستثناء SchedulerNotRunningError.
+        # عزله هنا يضمن أن فشل إيقاف الجدول لا يمنع إغلاق العميلين.
+        if _scheduler:
+            try:
+                _scheduler.stop()
+            except Exception as exc:
+                log.warning("scheduler.stop_failed", error=str(exc))
+
+        # يُغلق كل عميل مرة واحدة، وبحراسة، حتى يبقى الإيقاف سليمًا إذا فشل
+        # الإقلاع في منتصفه. فشل إغلاق أحدهما لا يمنع إغلاق الآخر.
+        for _name, _client in (
+            ("heartbeat", _heartbeat_http_client),
+            ("waha", _waha_http_client),
+        ):
+            if _client is not None:
+                try:
+                    await _client.aclose()
+                except Exception as exc:
+                    log.warning("http_client.close_failed", client=_name, error=str(exc))
+
+        log.info("Shutting down Smartfield Lead Agent system")
 
 
 # ── FastAPI App ────────────────────────────────────────────────────────────────

@@ -39,10 +39,15 @@ class WAHAMonitor:
         self,
         waha_url: str,
         api_key: str,
+        client: httpx.AsyncClient,
         session: str = "default",
         telegram: Optional["TelegramHandler"] = None,
         owner_chat_ids: Optional[list[str]] = None,
     ) -> None:
+        # عميل HTTP طويل العمر يملكه lifespan. مطلوب عمدًا وليس اختياريًا:
+        # كان الفحص الدوري ينشئ عميلًا لكل نداء، وكل عميل يحمل SSLContext
+        # لا يُحرَّر إلا بجمع دوري لم يكن يعمل — فينمو RSS بلا حد.
+        self._client = client
         self.waha_url = waha_url.rstrip("/")
         self.api_key = api_key
         self.session = session
@@ -93,12 +98,13 @@ class WAHAMonitor:
     async def _get_status(self) -> Optional[str]:
         url = f"{self.waha_url}/api/sessions/{self.session}"
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(url, headers={"X-Api-Key": self.api_key})
-                if r.status_code == 404:
-                    return None
-                self._consecutive_failures = 0  # reset on success
-                return r.json().get("status")
+            r = await self._client.get(
+                url, headers={"X-Api-Key": self.api_key}, timeout=10
+            )
+            if r.status_code == 404:
+                return None
+            self._consecutive_failures = 0  # reset on success
+            return r.json().get("status")
         except Exception as exc:
             self._consecutive_failures += 1
             backoff = min(5 * (2 ** self._consecutive_failures), _MAX_RETRY_BACKOFF_S)
